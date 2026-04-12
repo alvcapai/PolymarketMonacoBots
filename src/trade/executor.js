@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { Wallet } from "ethers";
+import { JsonRpcProvider, Wallet } from "ethers";
 import { Chain, ClobClient, OrderType, Side } from "@polymarket/clob-client";
+import { CONFIG } from "../config.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -11,13 +12,13 @@ const ANSI = {
   yellow:  "\x1b[33m",
 };
 
-const CLOB_HOST     = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
-const CHAIN_ID      = Chain.POLYGON;
-const TRADE_MOCK    = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
+const CLOB_HOST  = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
+const CHAIN_ID   = Chain.POLYGON;
+const TRADE_MOCK = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function normalizePk(raw) {
+function normalizePrivateKey(raw) {
   const pk = String(raw ?? "").trim();
   if (!pk) throw new Error("[executor] Variável de ambiente PK não encontrada.");
   return pk.startsWith("0x") ? pk : `0x${pk}`;
@@ -60,9 +61,30 @@ function formatCents(price) {
 let clobClient = null;
 
 if (!TRADE_MOCK) {
-  const wallet = new Wallet(normalizePk(process.env.PK));
-  const creds  = loadApiCreds();
-  clobClient   = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds);
+  const pk = process.env.PK;
+  const key = process.env.POLYMARKET_API_KEY;
+  const secret = process.env.POLYMARKET_API_SECRET;
+  const passphrase = process.env.POLYMARKET_API_PASSPHRASE;
+
+  const missingVars = [
+    !pk          && "PK",
+    !key         && "POLYMARKET_API_KEY",
+    !secret      && "POLYMARKET_API_SECRET",
+    !passphrase  && "POLYMARKET_API_PASSPHRASE",
+  ].filter(Boolean);
+
+  if (missingVars.length) {
+    throw new Error(
+      `[executor] Configuração incompleta para modo real. Variáveis ausentes: ${missingVars.join(", ")}. ` +
+      "Defina essas variáveis no .env ou ative TRADE_MOCK_MODE=true."
+    );
+  }
+
+  const provider = new JsonRpcProvider(CONFIG.chainlink.polygonRpcUrl);
+  const wallet   = new Wallet(normalizePrivateKey(pk), provider);
+  const creds    = loadApiCreds();
+
+  clobClient = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds);
   console.log(`${ANSI.green}[executor] ClobClient inicializado (modo real).${ANSI.reset}`);
 } else {
   console.log(`${ANSI.yellow}[executor] TRADE_MOCK_MODE ativo — nenhuma ordem real será enviada.${ANSI.reset}`);
