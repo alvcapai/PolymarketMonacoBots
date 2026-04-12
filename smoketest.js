@@ -119,15 +119,20 @@ async function runSmokeTest() {
   let balance = "N/A";
   let allowance = "N/A";
   try {
-    const { ok, body } = await l2get("/balance-allowance?asset_type=COLLATERAL");
+    const { ok, status, body } = await l2get("/balance-allowance?asset_type=COLLATERAL");
     if (ok) {
-      // Saldo em wei (6 casas decimais para USDC)
+      // O servidor retorna o saldo como float string (ex: "17.5"), não em wei
       const raw = parseFloat(body.balance ?? "0");
-      balance   = isNaN(raw) ? body.balance : `$${(raw / 1e6).toFixed(2)} USDC`;
+      balance   = isNaN(raw) ? String(body.balance) : `$${raw.toFixed(2)} USDC`;
       const alw = parseFloat(body.allowance ?? "0");
-      allowance = isNaN(alw) ? body.allowance : `$${(alw / 1e6).toFixed(2)} USDC`;
+      allowance = isNaN(alw) ? String(body.allowance) : `$${alw.toFixed(2)} USDC`;
+    } else {
+      balance   = `ERRO ${status}: ${JSON.stringify(body)}`;
+      allowance = "—";
     }
-  } catch (_) { /* não bloqueia o sucesso do smoketest */ }
+  } catch (err) {
+    balance = `ERRO: ${err?.message ?? String(err)}`;
+  }
 
   // ── Resultado ────────────────────────────────────────────────────────────
   console.log(
