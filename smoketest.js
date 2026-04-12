@@ -169,16 +169,21 @@ async function runSmokeTest() {
   let marketStatus = "N/A";
   let sampleMarket = null;
   try {
-    const res  = await fetch(
-      `${CLOB_HOST}/markets?active=true&closed=false&tag_slug=btc&limit=1`
-    );
+    // Busca mercados ativos e filtra client-side por BTC/Bitcoin na questão
+    const res  = await fetch(`${CLOB_HOST}/markets?active=true&closed=false&limit=100`);
     const body = await res.json().catch(() => ({}));
     const list  = body.data ?? (Array.isArray(body) ? body : []);
-    if (res.ok && list.length > 0) {
-      sampleMarket = list[0];
-      marketStatus = `OK — "${sampleMarket.question?.slice(0, 60) ?? sampleMarket.condition_id}"`;
-    } else if (res.ok) {
-      marketStatus = "OK (nenhum mercado BTC ativo encontrado)";
+    if (res.ok) {
+      const btcMarkets = list.filter(m => {
+        const q = (m.question ?? m.description ?? "").toLowerCase();
+        return q.includes("bitcoin") || q.includes("btc");
+      });
+      if (btcMarkets.length > 0) {
+        sampleMarket = btcMarkets[0];
+        marketStatus = `OK — "${sampleMarket.question?.slice(0, 60) ?? sampleMarket.condition_id}"`;
+      } else {
+        marketStatus = "OK (nenhum mercado BTC ativo encontrado)";
+      }
     } else {
       marketStatus = `ERRO ${res.status}`;
     }
