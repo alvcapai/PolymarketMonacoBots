@@ -31,6 +31,10 @@ const CHAIN_ID  = 137; // Polygon mainnet
 const ENV_PATH  = resolve(process.cwd(), ".env");
 
 const PK = String(process.env.PK ?? "").trim();
+const PROXY_ADDRESS = String(process.env.POLYMARKET_PROXY_ADDRESS ?? "").trim();
+const SIGNATURE_TYPE = String(
+  process.env.POLYMARKET_SIGNATURE_TYPE ?? (PROXY_ADDRESS ? "2" : "0")
+).trim();
 
 if (!PK) {
   console.error(`\n${R}${B}[ERRO] PK ausente no .env.${X}\n`);
@@ -88,6 +92,10 @@ async function run() {
   console.log(`${C}  • Endpoint : ${CLOB_HOST}${X}`);
   console.log(`${C}  • Chain    : Polygon (${CHAIN_ID})${X}`);
   console.log(`${C}  • .env     : ${ENV_PATH}${X}\n`);
+  if (PROXY_ADDRESS) {
+    console.log(`${C}  • Funder   : ${PROXY_ADDRESS}${X}`);
+    console.log(`${C}  • Sig type : ${SIGNATURE_TYPE}${X}\n`);
+  }
 
   // ── [1] Instanciar wallet ──────────────────────────────────────────────────
   let wallet;
@@ -128,7 +136,13 @@ async function run() {
   // ── Helper: tenta criar, deletar (L1) e recriar a key ────────────────────
   async function tryCreate(nonce = 0) {
     const headers = await buildL1Headers(nonce);
-    const res     = await fetch(`${CLOB_HOST}/auth/api-key`, { method: "POST", headers });
+    const params  = new URLSearchParams();
+    if (PROXY_ADDRESS) {
+      params.set("signature_type", SIGNATURE_TYPE);
+      params.set("funder", PROXY_ADDRESS);
+    }
+    const url = `${CLOB_HOST}/auth/api-key${params.size ? `?${params.toString()}` : ""}`;
+    const res = await fetch(url, { method: "POST", headers });
     const body    = await res.json().catch(() => ({}));
     return { status: res.status, ok: res.ok, body };
   }
@@ -143,7 +157,13 @@ async function run() {
 
   async function tryDerive(nonce = 0) {
     const headers = await buildL1Headers(nonce);
-    const res     = await fetch(`${CLOB_HOST}/auth/derive-api-key`, { method: "GET", headers });
+    const params  = new URLSearchParams();
+    if (PROXY_ADDRESS) {
+      params.set("signature_type", SIGNATURE_TYPE);
+      params.set("funder", PROXY_ADDRESS);
+    }
+    const url = `${CLOB_HOST}/auth/derive-api-key${params.size ? `?${params.toString()}` : ""}`;
+    const res = await fetch(url, { method: "GET", headers });
     const body    = await res.json().catch(() => ({}));
     return { status: res.status, ok: res.ok, body };
   }

@@ -27,6 +27,9 @@ const API_KEY    = String(process.env.POLYMARKET_API_KEY        ?? "").trim();
 const SECRET     = String(process.env.POLYMARKET_API_SECRET     ?? "").trim();
 const PASSPHRASE = String(process.env.POLYMARKET_API_PASSPHRASE ?? "").trim();
 const PROXY_ADDRESS = String(process.env.POLYMARKET_PROXY_ADDRESS ?? "").trim();
+const SIGNATURE_TYPE = String(
+  process.env.POLYMARKET_SIGNATURE_TYPE ?? (PROXY_ADDRESS ? "2" : "0")
+).trim();
 
 const missing = [
   !PK         && "PK",
@@ -57,8 +60,8 @@ function buildHmacSignature(secret, timestamp, method, path, body = "") {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function runSmokeTest() {
-  // A EOA (MetaMask) continua sendo a identidade do signer.
-  // Para saldo/allowance, a Polymarket pode usar a proxy wallet/funder.
+  // A documentação da Polymarket exige que POLY_ADDRESS continue sendo
+  // o signer address no L2. A proxy wallet entra como funder/signature type.
   let walletAddress;
   try {
     const normalizedPK = PK.startsWith("0x") ? PK : `0x${PK}`;
@@ -69,6 +72,7 @@ async function runSmokeTest() {
     if (PROXY_ADDRESS) {
       console.log(`${Y}[smoketest] Proxy wallet configurada: ${PROXY_ADDRESS}${X}`);
     }
+    console.log(`${Y}[smoketest] Signature type: ${SIGNATURE_TYPE}${X}`);
     console.log(`${Y}[smoketest] Validando credenciais L2 via HMAC raw…${X}\n`);
   } catch (err) {
     console.error(`\n${R}${B}[ERRO] Falha ao instanciar wallet: ${err?.message}${X}\n`);
@@ -126,18 +130,16 @@ async function runSmokeTest() {
   // ── [2] Buscar saldo USDC (COLLATERAL) ───────────────────────────────────
   let balance = "N/A";
   let allowance = "N/A";
-  const balanceAddress = PROXY_ADDRESS || walletAddress;
-  const balanceSignatureType = PROXY_ADDRESS ? "1" : "0";
   try {
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const path = "/balance-allowance";
     const signature = buildHmacSignature(SECRET, timestamp, "GET", path);
-    const query = `asset_type=COLLATERAL&signature_type=${balanceSignatureType}`;
+    const query = `asset_type=COLLATERAL&signature_type=${SIGNATURE_TYPE}`;
     const res = await fetch(`${CLOB_HOST}${path}?${query}`, {
       method: "GET",
       headers: {
         "Content-Type":    "application/json",
-        "POLY_ADDRESS":    balanceAddress,
+        "POLY_ADDRESS":    walletAddress,
         "POLY_API_KEY":    API_KEY,
         "POLY_PASSPHRASE": PASSPHRASE,
         "POLY_TIMESTAMP":  timestamp,
@@ -167,7 +169,8 @@ async function runSmokeTest() {
     `${G}${B}╚══════════════════════════════════════════════════════════╝${X}\n` +
     `${G}  • Endpoint          : ${CLOB_HOST}${X}\n` +
     `${G}  • Wallet signer     : ${walletAddress}${X}\n` +
-    `${G}  • Wallet consultada : ${balanceAddress}${X}\n` +
+    `${G}  • Wallet funder     : ${PROXY_ADDRESS || walletAddress}${X}\n` +
+    `${G}  • Signature type    : ${SIGNATURE_TYPE}${X}\n` +
     `${G}  • POLYMARKET_API_KEY: ${API_KEY}${X}\n` +
     `${G}  • Saldo USDC        : ${balance}${X}\n` +
     `${G}  • Allowance USDC    : ${allowance}${X}\n`
