@@ -68,7 +68,16 @@ async function runSmokeTest() {
   try {
     const result = await clobClient.getApiKeys();
 
-    // Se chegou até aqui, a autenticação L2 foi aceita pelo servidor.
+    // O SDK v2.x NÃO lança exceção em 401 — retorna o body como objeto.
+    // Precisamos checar explicitamente se veio um campo "error".
+    if (result && typeof result === "object" && "error" in result) {
+      const msg = String(result.error ?? "Unauthorized");
+      const fake = new Error(msg);
+      fake.status = 401;
+      throw fake;
+    }
+
+    // Chegou aqui: autenticação L2 aceita pelo servidor.
     const keyCount = Array.isArray(result) ? result.length : "?";
     console.log(
       `${G}${B}╔══════════════════════════════════════════════════════════╗${X}\n` +
