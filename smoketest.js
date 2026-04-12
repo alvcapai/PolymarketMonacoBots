@@ -68,11 +68,11 @@ async function runSmokeTest() {
   try {
     const result = await clobClient.getApiKeys();
 
-    // O SDK v2.x NÃO lança exceção em 401 — retorna o body como objeto.
-    // Precisamos checar explicitamente se veio um campo "error".
-    if (result && typeof result === "object" && "error" in result) {
-      const msg = String(result.error ?? "Unauthorized");
-      const fake = new Error(msg);
+    // O SDK v2.x NÃO lança exceção em 401 — loga internamente e retorna
+    // undefined/null ou { error: '...' }. Checamos ambos os casos.
+    const errorMsg = result?.error ?? null;
+    if (!result || errorMsg) {
+      const fake = new Error(errorMsg ?? "Unauthorized/Invalid api key");
       fake.status = 401;
       throw fake;
     }
