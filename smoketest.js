@@ -165,7 +165,55 @@ async function runSmokeTest() {
     balance = `ERRO: ${err?.message ?? String(err)}`;
   }
 
-  // ── Resultado ────────────────────────────────────────────────────────────
+  // ── [3] Verificar mercados BTC ativos (endpoint público) ─────────────────
+  let marketStatus = "N/A";
+  let sampleMarket = null;
+  try {
+    const res  = await fetch(
+      `${CLOB_HOST}/markets?active=true&closed=false&tag_slug=btc&limit=1`
+    );
+    const body = await res.json().catch(() => ({}));
+    const list  = body.data ?? (Array.isArray(body) ? body : []);
+    if (res.ok && list.length > 0) {
+      sampleMarket = list[0];
+      marketStatus = `OK — "${sampleMarket.question?.slice(0, 60) ?? sampleMarket.condition_id}"`;
+    } else if (res.ok) {
+      marketStatus = "OK (nenhum mercado BTC ativo encontrado)";
+    } else {
+      marketStatus = `ERRO ${res.status}`;
+    }
+  } catch (err) {
+    marketStatus = `ERRO: ${err?.message ?? String(err)}`;
+  }
+
+  // ── [4] Verificar se pode criar ordem (dry-run sem submeter) ─────────────
+  let orderStatus = "N/A";
+  if (sampleMarket) {
+    try {
+      const tokenId = sampleMarket.tokens?.[0]?.token_id;
+      if (tokenId) {
+        // Tenta criar a estrutura de ordem sem submeter — apenas busca o preço
+        const res  = await fetch(`${CLOB_HOST}/midpoint?token_id=${tokenId}`);
+        const body = await res.json().catch(() => ({}));
+        if (res.ok && body.mid != null) {
+          orderStatus = `OK — midpoint ${(Number(body.mid) * 100).toFixed(1)}c`;
+        } else {
+          orderStatus = `ERRO ${res.status}: ${JSON.stringify(body)}`;
+        }
+      } else {
+        orderStatus = "sem token_id no mercado";
+      }
+    } catch (err) {
+      orderStatus = `ERRO: ${err?.message ?? String(err)}`;
+    }
+  }
+
+  // ── Resultado final ───────────────────────────────────────────────────────
+  const allowanceRaw  = Number((allowance.match(/\$([\d.]+)/) ?? [])[1] ?? -1);
+  const allowanceOk   = allowanceRaw > 0;
+  const balanceRaw    = Number((balance.match(/\$([\d.]+)/) ?? [])[1] ?? 0);
+  const readyToBet    = allowanceOk && balanceRaw > 0 && orderStatus.startsWith("OK");
+
   console.log(
     `${G}${B}╔══════════════════════════════════════════════════════════╗${X}\n` +
     `${G}${B}║  [SUCESSO] Chaves validadas e conexão L2 perfeita!       ║${X}\n` +
@@ -176,8 +224,23 @@ async function runSmokeTest() {
     `${G}  • Signature type    : ${SIGNATURE_TYPE}${X}\n` +
     `${G}  • POLYMARKET_API_KEY: ${API_KEY}${X}\n` +
     `${G}  • Saldo USDC        : ${balance}${X}\n` +
-    `${G}  • Allowance USDC    : ${allowance}${X}\n`
+    `${G}  • Allowance USDC    : ${allowance}${X}\n` +
+    `${G}  • Mercados BTC      : ${marketStatus}${X}\n` +
+    `${G}  • Preço (midpoint)  : ${orderStatus}${X}\n`
   );
+
+  if (readyToBet) {
+    console.log(
+      `\n${G}${B}  ✔  PRONTO PARA APOSTAR — saldo, allowance e mercado OK.${X}\n`
+    );
+  } else {
+    console.log(`\n${Y}${B}  Pendências antes de apostar:${X}`);
+    if (balanceRaw <= 0)  console.log(`${R}  ✘  Saldo USDC zerado — deposite USDC na Polymarket.${X}`);
+    if (!allowanceOk)     console.log(`${R}  ✘  Allowance zerada — acesse polymarket.com e faça um depósito${X}\n` +
+                                      `${R}     para acionar o approve do contrato USDC.${X}`);
+    if (!orderStatus.startsWith("OK")) console.log(`${R}  ✘  Mercado/preço indisponível: ${orderStatus}${X}`);
+    console.log();
+  }
 }
 
 runSmokeTest();
