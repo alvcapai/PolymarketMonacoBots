@@ -66,7 +66,8 @@ function buildHmacSignature(secret, timestamp, method, path, body = "") {
   const message     = `${timestamp}${method}${path}${body}`;
   const secretStd   = secret.replace(/-/g, "+").replace(/_/g, "/");
   const secretBytes = Buffer.from(secretStd, "base64");
-  return crypto.createHmac("sha256", secretBytes).update(message).digest("base64");
+  return crypto.createHmac("sha256", secretBytes).update(message).digest("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_");
 }
 
 // ─── .env patcher ────────────────────────────────────────────────────────────

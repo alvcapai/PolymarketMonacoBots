@@ -49,7 +49,8 @@ function buildHmacSignature(secret, timestamp, method, path, body = "") {
   // URL-safe base64 → standard base64 antes de decodificar
   const secretStd   = secret.replace(/-/g, "+").replace(/_/g, "/");
   const secretBytes = Buffer.from(secretStd, "base64");
-  return crypto.createHmac("sha256", secretBytes).update(message).digest("base64");
+  return crypto.createHmac("sha256", secretBytes).update(message).digest("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_");
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
