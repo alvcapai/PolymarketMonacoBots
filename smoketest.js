@@ -140,7 +140,7 @@ async function runSmokeTest() {
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const path = "/balance-allowance";
     const signature = buildHmacSignature(SECRET, timestamp, "GET", path);
-    const query = `asset_type=COLLATERAL&signature_type=${SIGNATURE_TYPE}`;
+    const query = `asset_type=COLLATERAL&signature_type=${SIGNATURE_TYPE}${PROXY_ADDRESS ? `&funder=${PROXY_ADDRESS}` : ""}`;
     const res = await fetch(`${CLOB_HOST}${path}?${query}`, {
       method: "GET",
       headers: {
@@ -165,52 +165,49 @@ async function runSmokeTest() {
     balance = `ERRO: ${err?.message ?? String(err)}`;
   }
 
-  // ── [3] Verificar mercados BTC ativos (endpoint público) ─────────────────
+  // ── [3] Verificar mercado BTC com orderbook ativo ────────────────────────
   let marketStatus = "N/A";
   let sampleMarket = null;
+  let orderStatus  = "N/A";
   try {
-    // Busca mercados ativos e filtra client-side por BTC/Bitcoin na questão
-    const res  = await fetch(`${CLOB_HOST}/markets?active=true&closed=false&limit=100`);
-    const body = await res.json().catch(() => ({}));
-    const list  = body.data ?? (Array.isArray(body) ? body : []);
-    if (res.ok) {
-      const btcMarkets = list.filter(m => {
-        const q = (m.question ?? m.description ?? "").toLowerCase();
-        return q.includes("bitcoin") || q.includes("btc");
+    // Pagina até encontrar um mercado BTC com orderbook real
+    let cursor = "";
+    outer: for (let page = 0; page < 5; page++) {
+      const url  = `${CLOB_HOST}/markets?active=true&closed=false&limit=100${cursor ? `&next_cursor=${cursor}` : ""}`;
+      const res  = await fetch(url);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { marketStatus = `ERRO ${res.status}`; break; }
+
+      const list = body.data ?? (Array.isArray(body) ? body : []);
+      const btc  = list.filter(m => {
+        const q = (m.question ?? "").toLowerCase();
+        return q.includes("bitcoin") || q.includes(" btc");
       });
-      if (btcMarkets.length > 0) {
-        sampleMarket = btcMarkets[0];
-        marketStatus = `OK — "${sampleMarket.question?.slice(0, 60) ?? sampleMarket.condition_id}"`;
-      } else {
-        marketStatus = "OK (nenhum mercado BTC ativo encontrado)";
+
+      for (const market of btc) {
+        const tokenId = market.tokens?.[0]?.token_id;
+        if (!tokenId) continue;
+        const r = await fetch(`${CLOB_HOST}/midpoint?token_id=${tokenId}`);
+        const b = await r.json().catch(() => ({}));
+        if (r.ok && b.mid != null) {
+          sampleMarket = market;
+          marketStatus = `OK — "${market.question?.slice(0, 55)}"`;
+          orderStatus  = `OK — midpoint ${(Number(b.mid) * 100).toFixed(1)}c`;
+          break outer;
+        }
       }
-    } else {
-      marketStatus = `ERRO ${res.status}`;
+
+      cursor = body.next_cursor ?? "";
+      if (!cursor || list.length === 0) break;
+    }
+
+    if (!sampleMarket && marketStatus === "N/A") {
+      marketStatus = "Nenhum mercado BTC com orderbook ativo encontrado";
+      orderStatus  = "—";
     }
   } catch (err) {
     marketStatus = `ERRO: ${err?.message ?? String(err)}`;
-  }
-
-  // ── [4] Verificar se pode criar ordem (dry-run sem submeter) ─────────────
-  let orderStatus = "N/A";
-  if (sampleMarket) {
-    try {
-      const tokenId = sampleMarket.tokens?.[0]?.token_id;
-      if (tokenId) {
-        // Tenta criar a estrutura de ordem sem submeter — apenas busca o preço
-        const res  = await fetch(`${CLOB_HOST}/midpoint?token_id=${tokenId}`);
-        const body = await res.json().catch(() => ({}));
-        if (res.ok && body.mid != null) {
-          orderStatus = `OK — midpoint ${(Number(body.mid) * 100).toFixed(1)}c`;
-        } else {
-          orderStatus = `ERRO ${res.status}: ${JSON.stringify(body)}`;
-        }
-      } else {
-        orderStatus = "sem token_id no mercado";
-      }
-    } catch (err) {
-      orderStatus = `ERRO: ${err?.message ?? String(err)}`;
-    }
+    orderStatus  = "—";
   }
 
   // ── Resultado final ───────────────────────────────────────────────────────
