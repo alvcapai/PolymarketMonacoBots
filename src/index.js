@@ -27,6 +27,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
 import { executeTrade } from "./trade/executor.js";
+const tradedTokens = new Set();
 
 function countVwapCrosses(closes, vwapSeries, lookback) {
   if (closes.length < lookback || vwapSeries.length < lookback) return null;
@@ -739,8 +740,9 @@ async function main() {
         const targetProbability = extremeLong ? pLongPct : pShortPct;
         const tradeSizeUsd = Number(process.env.TRADE_SIZE_USDC || "5");
 
-        if (targetTokenId && Number.isFinite(Number(targetPrice)) && Number(targetPrice) > 0 && Number.isFinite(tradeSizeUsd) && tradeSizeUsd > 0) {
+        if (targetTokenId && !tradedTokens.has(targetTokenId) && Number.isFinite(Number(targetPrice)) && Number(targetPrice) > 0 && Number.isFinite(tradeSizeUsd) && tradeSizeUsd > 0) {
           try {
+            tradedTokens.add(targetTokenId);
             await executeTrade(
               targetTokenId,
               "BUY",
