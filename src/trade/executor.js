@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import { JsonRpcProvider, Wallet } from "ethers";
 import { Chain, ClobClient, OrderType, Side } from "@polymarket/clob-client";
 import { CONFIG } from "../config.js";
@@ -12,9 +13,12 @@ const ANSI = {
   yellow:  "\x1b[33m",
 };
 
-const CLOB_HOST  = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
-const CHAIN_ID   = Chain.POLYGON;
-const TRADE_MOCK = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
+const CLOB_HOST      = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
+const CHAIN_ID       = Chain.POLYGON;
+const TRADE_MOCK     = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
+const PROXY_ADDRESS  = String(process.env.POLYMARKET_PROXY_ADDRESS ?? "").trim();
+// Polymarket SignatureType: 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
+const SIGNATURE_TYPE = Number(process.env.POLYMARKET_SIGNATURE_TYPE ?? (PROXY_ADDRESS ? 2 : 0));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -55,10 +59,26 @@ function formatCents(price) {
   return `${(Number(price) * 100).toFixed(1).replace(/\.0$/, "")}c`;
 }
 
+// ─── HMAC helper (para consulta de saldo via API raw) ─────────────────────────
+function buildHmacSignature(secret, timestamp, method, path) {
+  const message   = `${timestamp}${method}${path}`;
+  const secretStd = secret.replace(/-/g, "+").replace(/_/g, "/");
+  return crypto
+    .createHmac("sha256", Buffer.from(secretStd, "base64"))
+    .update(message)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
 // ─── Initialization ───────────────────────────────────────────────────────────
 // Credenciais e wallet são validadas AGORA (fail-fast), não na primeira ordem.
 
 let clobClient = null;
+let walletAddress = null;
+let apiSecret = null;
+let apiKey = null;
+let apiPassphrase = null;
 
 if (!TRADE_MOCK) {
   const pk = process.env.PK;
@@ -84,10 +104,63 @@ if (!TRADE_MOCK) {
   const wallet   = new Wallet(normalizePrivateKey(pk), provider);
   const creds    = loadApiCreds();
 
-  clobClient = new ClobClient(CLOB_HOST, CHAIN_ID, wallet, creds);
-  console.log(`${ANSI.green}[executor] ClobClient inicializado (modo real).${ANSI.reset}`);
+  walletAddress  = wallet.address;
+  apiSecret      = creds.secret;
+  apiKey         = creds.key;
+  apiPassphrase  = creds.passphrase;
+
+  // ── ClobClient com signature type e funder address (hack para proxy wallets)
+  // SignatureType 2 = POLY_GNOSIS_SAFE — sem isso, ordens de proxy falham.
+  clobClient = new ClobClient(
+    CLOB_HOST,
+    CHAIN_ID,
+    wallet,
+    creds,
+    SIGNATURE_TYPE,
+    PROXY_ADDRESS || undefined,
+  );
+
+  console.log(
+    `${ANSI.green}[executor] ClobClient inicializado (modo real, sig type ${SIGNATURE_TYPE}` +
+    `${PROXY_ADDRESS ? `, funder ${PROXY_ADDRESS}` : ""}).${ANSI.reset}`
+  );
 } else {
   console.log(`${ANSI.yellow}[executor] TRADE_MOCK_MODE ativo — nenhuma ordem real será enviada.${ANSI.reset}`);
+}
+
+// ─── fetchUsdcBalance ─────────────────────────────────────────────────────────
+/**
+ * Consulta o saldo USDC collateral via API CLOB com HMAC raw.
+ * Retorna o valor em dólares (ex: 16.21) ou null se não disponível.
+ */
+export async function fetchUsdcBalance() {
+  if (!apiKey || !apiSecret || !apiPassphrase || !walletAddress) return null;
+
+  try {
+    const path = "/balance-allowance";
+    const ts   = Math.floor(Date.now() / 1000).toString();
+    const sig  = buildHmacSignature(apiSecret, ts, "GET", path);
+    const query = `asset_type=COLLATERAL&signature_type=${SIGNATURE_TYPE}${PROXY_ADDRESS ? `&funder=${PROXY_ADDRESS}` : ""}`;
+
+    const res = await fetch(`${CLOB_HOST}${path}?${query}`, {
+      method: "GET",
+      headers: {
+        "Content-Type":    "application/json",
+        "POLY_ADDRESS":    walletAddress,
+        "POLY_API_KEY":    apiKey,
+        "POLY_PASSPHRASE": apiPassphrase,
+        "POLY_TIMESTAMP":  ts,
+        "POLY_SIGNATURE":  sig,
+      },
+    });
+
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => ({}));
+    const raw  = Number(body.balance ?? 0);
+    return Number.isFinite(raw) ? raw / 1_000_000 : null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -122,7 +195,7 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
   // ── Mock Mode ────────────────────────────────────────────────────────────
   if (TRADE_MOCK) {
     console.log(
-      `${ANSI.yellow}[MOCK EXECUCAO] Apostando $${usdcSize} em ${Side.BUY}` +
+      `${ANSI.yellow}[MOCK EXECUCAO] Apostando $${usdcSize.toFixed(2)} em ${Side.BUY}` +
       ` no Token ${tokenId} a ${formatCents(price)}` +
       ` (Probabilidade: ${probabilityN.toFixed(2)}%)${ANSI.reset}`
     );
@@ -131,7 +204,7 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
 
   // ── Modo Real ────────────────────────────────────────────────────────────
   console.log(
-    `${ANSI.green}[EXECUCAO] Apostando $${usdcSize} em ${Side.BUY}` +
+    `${ANSI.green}[EXECUCAO] Apostando $${usdcSize.toFixed(2)} em ${Side.BUY}` +
     ` no Token ${tokenId} a ${formatCents(price)}` +
     ` (Probabilidade: ${probabilityN.toFixed(2)}%)${ANSI.reset}`
   );

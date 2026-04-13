@@ -4,7 +4,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "start:15m": "TIMEFRAME=15m node src/index.js",
+    "start:5m": "TIMEFRAME=5m node src/index.js"
   },
   "dependencies": {
     "@polymarket/clob-client": "^2.8.0",

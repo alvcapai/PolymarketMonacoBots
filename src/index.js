@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
-import { executeTrade } from "./trade/executor.js";
+import { executeTrade, fetchUsdcBalance } from "./trade/executor.js";
 const tradedTokens = new Set();
 
 function countVwapCrosses(closes, vwapSeries, lookback) {
@@ -408,6 +408,30 @@ async function main() {
   let prevCurrentPrice = null;
   let priceToBeatState = { slug: null, value: null, setAtMs: null };
 
+  // ── Gestão de banca dinâmica ─────────────────────────────────────────────
+  const PROFIT_STOP_USD   = 120;
+  const MIN_TRADE_SIZE    = 1.0;
+  let cachedBalance       = null;
+  let lastBalanceCheckMs  = 0;
+  const BALANCE_TTL_MS    = 30_000; // Consulta saldo a cada 30 s
+
+  function computeTradeSize(balanceUsdc) {
+    if (!Number.isFinite(balanceUsdc) || balanceUsdc <= 0) return MIN_TRADE_SIZE;
+    const pct  = balanceUsdc > 50 ? 0.50 : 0.25;
+    return Math.max(balanceUsdc * pct, MIN_TRADE_SIZE);
+  }
+
+  async function refreshBalance() {
+    const now = Date.now();
+    if (now - lastBalanceCheckMs < BALANCE_TTL_MS && cachedBalance !== null) return cachedBalance;
+    const bal = await fetchUsdcBalance();
+    if (bal !== null) {
+      cachedBalance      = bal;
+      lastBalanceCheckMs = now;
+    }
+    return cachedBalance;
+  }
+
   const header = [
     "timestamp",
     "entry_minute",
@@ -425,6 +449,18 @@ async function main() {
 
   while (true) {
     const timing = getCandleWindowTiming(CONFIG.candleWindowMinutes);
+
+    // ── Profit-stop: verifica saldo a cada BALANCE_TTL_MS ──────────────────
+    const currentBalance = await refreshBalance();
+    if (currentBalance !== null && currentBalance >= PROFIT_STOP_USD) {
+      console.log(
+        `\n\x1b[1m\x1b[32m╔══════════════════════════════════════════════════════════════╗\x1b[0m\n` +
+        `\x1b[1m\x1b[32m║  META DE $${PROFIT_STOP_USD} ATINGIDA. SAQUE DE $100 RECOMENDADO.          ║\x1b[0m\n` +
+        `\x1b[1m\x1b[32m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n` +
+        `\x1b[32m  Saldo atual: $${currentBalance.toFixed(2)} USDC — encerrando o bot.\x1b[0m\n`
+      );
+      process.exit(0);
+    }
 
     const wsTick = binanceStream.getLast();
     const wsPrice = wsTick?.price ?? null;
@@ -702,7 +738,7 @@ async function main() {
         kv("ET | Session:", `${ANSI.white}${fmtEtTime(new Date())}${ANSI.reset} | ${ANSI.white}${getBtcSession(new Date())}${ANSI.reset}`),
         "",
         sepLine(),
-        centerText(`${ANSI.dim}${ANSI.gray}PolymarketBTC15mAssistant${ANSI.reset}`, screenWidth())
+        centerText(`${ANSI.dim}${ANSI.gray}PolymarketBTCAssistant [${CONFIG.timeframe}]${ANSI.reset}`, screenWidth())
       ].filter((x) => x !== null);
 
       renderScreen(lines.join("\n") + "\n");
@@ -710,7 +746,7 @@ async function main() {
       prevSpotPrice = spotPrice ?? prevSpotPrice;
       prevCurrentPrice = currentPrice ?? prevCurrentPrice;
 
-      appendCsvRow("./logs/signals.csv", header, [
+      appendCsvRow(CONFIG.signalsCsv, header, [
         new Date().toISOString(),
         timing.elapsedMinutes.toFixed(3),
         timeLeftMin.toFixed(3),
@@ -725,20 +761,25 @@ async function main() {
         rec.action === "ENTER" ? `${rec.side}:${rec.phase}:${rec.strength}` : "NO_TRADE"
       ]);
 
-      // AUTO-TRADE: dispara no maximo uma ordem por marketSlug quando a confianca entra em zona extrema.
-      const pLongPct = Number.isFinite(Number(pLong)) ? Number(pLong) * 100 : null;
+      // AUTO-TRADE: dispara no máximo uma ordem por marketSlug quando a confiança entra em zona extrema.
+      const pLongPct  = Number.isFinite(Number(pLong))  ? Number(pLong)  * 100 : null;
       const pShortPct = Number.isFinite(Number(pShort)) ? Number(pShort) * 100 : null;
-      const extremeLong = pLongPct !== null && pLongPct >= 75;
-      const extremeShort = pShortPct !== null && pShortPct >= 75;
+      const extremeLong  = pLongPct  !== null && pLongPct  >= 70;
+      const extremeShort = pShortPct !== null && pShortPct >= 70;
       const canTradeThisMarket = poly.ok && marketSlug && !tradedMarketSlugs.has(marketSlug);
 
       if (canTradeThisMarket && (extremeLong || extremeShort)) {
         const targetTokenId = extremeLong ? poly.tokens.upTokenId : poly.tokens.downTokenId;
-        const targetPrice = extremeLong
-          ? (poly.orderbook.up.bestAsk ?? poly.prices.up)
+        const targetPrice   = extremeLong
+          ? (poly.orderbook.up.bestAsk   ?? poly.prices.up)
           : (poly.orderbook.down.bestAsk ?? poly.prices.down);
         const targetProbability = extremeLong ? pLongPct : pShortPct;
-        const tradeSizeUsd = Number(process.env.TRADE_SIZE_USDC || "5");
+
+        // ── Gestão de banca dinâmica ────────────────────────────────────────
+        const balanceNow  = await refreshBalance();
+        const tradeSizeUsd = balanceNow !== null
+          ? computeTradeSize(balanceNow)
+          : Math.max(Number(process.env.TRADE_SIZE_USDC || "5"), MIN_TRADE_SIZE);
 
         if (targetTokenId && !tradedTokens.has(targetTokenId) && Number.isFinite(Number(targetPrice)) && Number(targetPrice) > 0 && Number.isFinite(tradeSizeUsd) && tradeSizeUsd > 0) {
           try {
@@ -751,6 +792,8 @@ async function main() {
               Number(targetProbability)
             );
             tradedMarketSlugs.add(marketSlug);
+            // Invalidar cache de saldo após trade
+            lastBalanceCheckMs = 0;
           } catch (tradeError) {
             console.log(`Trade error: ${tradeError?.message ?? String(tradeError)}`);
           }
