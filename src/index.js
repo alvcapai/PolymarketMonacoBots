@@ -27,6 +27,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
 import { executeTrade, fetchUsdcBalance, transferUsdc, WITHDRAWAL_ADDRESS } from "./trade/executor.js";
+import { runAutoRedeem } from "./trade/redeemer.js";
 const tradedTokens = new Set();
 
 function countVwapCrosses(closes, vwapSeries, lookback) {
@@ -454,8 +455,21 @@ async function main() {
     "recommendation"
   ];
 
+  // Resgate automático a cada 2 minutos
+  const REDEEM_INTERVAL_MS = 2 * 60 * 1000;
+  let lastRedeemCheckMs = 0;
+
   while (true) {
     const timing = getCandleWindowTiming(CONFIG.candleWindowMinutes);
+
+    // ── Auto-redeem: resgata posições vencedoras a cada 2 min ─────────────
+    const nowMs = Date.now();
+    if (nowMs - lastRedeemCheckMs >= REDEEM_INTERVAL_MS) {
+      lastRedeemCheckMs = nowMs;
+      runAutoRedeem().catch(err =>
+        process.stderr.write(`\x1b[31m[REDEEM] Erro inesperado: ${err.message}\x1b[0m\n`)
+      );
+    }
 
     // ── Monaco Rule: saca automaticamente quando saldo ≥ $120 ─────────────
     const currentBalance = await refreshBalance();
