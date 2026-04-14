@@ -17,7 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ─── Configuração ─────────────────────────────────────────────────────────────
 
 const REFRESH_MS  = 3000;
-const THRESHOLD   = 60;       // % de confiança para disparar ordem
+const THRESHOLD   = 75;       // % de confiança para disparar ordem
 const BAR_WIDTH   = 14;
 const LOG_LINES   = 6;        // linhas do log a analisar por agente
 
@@ -100,16 +100,48 @@ function sw() {
   return Math.max(process.stdout.columns || 80, 72);
 }
 
+// ─── Detecção de PM2 ──────────────────────────────────────────────────────────
+
+let _pm2Available = null;
+
+function isPm2Available() {
+  if (_pm2Available !== null) return _pm2Available;
+  try {
+    execSync("pm2 --version", { encoding: "utf8", timeout: 2000, stdio: "pipe" });
+    _pm2Available = true;
+  } catch {
+    _pm2Available = false;
+  }
+  return _pm2Available;
+}
+
 // ─── Leitura de processos ─────────────────────────────────────────────────────
 
 function getRunningPids() {
+  // Tenta via PM2 primeiro — env vars não aparecem no ps aux com PM2
+  if (isPm2Available()) {
+    try {
+      const raw  = execSync("pm2 jlist", { encoding: "utf8", timeout: 3000, stdio: "pipe" });
+      const list = JSON.parse(raw);
+      const map  = {};
+      for (const proc of list) {
+        const tf = proc.pm2_env?.TIMEFRAME ?? proc.pm2_env?.env?.TIMEFRAME;
+        const pid = proc.pid;
+        const status = proc.pm2_env?.status;
+        if (tf && pid && status === "online") map[tf] = Number(pid);
+      }
+      return map;
+    } catch { /* fallback abaixo */ }
+  }
+
+  // Fallback: ps aux para processos iniciados manualmente
   try {
-    const out = execSync("ps aux", { encoding: "utf8", timeout: 2000 });
+    const out = execSync("ps aux", { encoding: "utf8", timeout: 2000, stdio: "pipe" });
     const map = {};
     for (const line of out.split("\n")) {
       if (!line.includes("node") || !line.includes("src/index")) continue;
-      const tfMatch  = line.match(/TIMEFRAME=([\w-]+)/);
-      const pidStr   = line.trim().split(/\s+/)[1];
+      const tfMatch = line.match(/TIMEFRAME=([\w-]+)/);
+      const pidStr  = line.trim().split(/\s+/)[1];
       if (tfMatch && pidStr) map[tfMatch[1]] = Number(pidStr);
     }
     return map;
@@ -320,14 +352,21 @@ function render() {
       lines.push(`   ${A.bold}${A.red}│  [S] Confirmar     [N] Cancelar                │${A.reset}`);
       lines.push(`   ${A.bold}${A.red}└────────────────────────────────────────────────┘${A.reset}`);
     }
+    if (sel && mode === "confirm-restart" && ag.running) {
+      lines.push(`   ${A.bold}${A.yellow}┌────────────────────────────────────────────────┐${A.reset}`);
+      lines.push(`   ${A.bold}${A.yellow}│  Reiniciar ${pad(ag.name + "?", 37)}│${A.reset}`);
+      lines.push(`   ${A.bold}${A.yellow}│  [S] Confirmar     [N] Cancelar                │${A.reset}`);
+      lines.push(`   ${A.bold}${A.yellow}└────────────────────────────────────────────────┘${A.reset}`);
+    }
 
     lines.push("");
   });
 
   // ── Rodapé ──
   lines.push(sep);
+  const pm2Label = isPm2Available() ? A.green + "PM2" + A.reset : A.yellow + "manual" + A.reset;
   if (mode === "view") {
-    lines.push(A.dim + " ↑ ↓  navegar     Enter = iniciar / parar agente selecionado     q = sair" + A.reset);
+    lines.push(A.dim + ` ↑ ↓  navegar   Enter = iniciar/parar   R = restart   q = sair   [${A.reset}${pm2Label}${A.dim}]` + A.reset);
   } else {
     lines.push(A.bold + A.yellow + " S = confirmar     N = cancelar" + A.reset);
   }
@@ -340,22 +379,49 @@ function render() {
 // ─── Ações ────────────────────────────────────────────────────────────────────
 
 function startAgent(agent) {
+  if (isPm2Available()) {
+    try {
+      execSync(`pm2 start ecosystem.config.cjs --only ${agent.name}`, {
+        cwd: __dirname, encoding: "utf8", stdio: "pipe", timeout: 5000,
+      });
+      return;
+    } catch { /* fallback abaixo */ }
+  }
+  // Fallback: spawn direto
   mkdirSync(path.resolve(__dirname, "logs"), { recursive: true });
   const logAbs = path.resolve(__dirname, agent.startLog);
-  const fd  = openSync(logAbs, "a");
-  const env = { ...process.env, TIMEFRAME: agent.timeframe };
-  const child = spawn("node", ["src/index.js"], {
-    cwd:      __dirname,
-    env,
-    stdio:    ["ignore", "ignore", fd],
-    detached: true,
+  const fd     = openSync(logAbs, "a");
+  const env    = { ...process.env, TIMEFRAME: agent.timeframe };
+  const child  = spawn("node", ["src/index.js"], {
+    cwd: __dirname, env, stdio: ["ignore", "ignore", fd], detached: true,
   });
   child.unref();
 }
 
 function stopAgent(agent) {
+  if (isPm2Available()) {
+    try {
+      execSync(`pm2 stop ${agent.name}`, {
+        cwd: __dirname, encoding: "utf8", stdio: "pipe", timeout: 5000,
+      });
+      return;
+    } catch { /* fallback abaixo */ }
+  }
   if (!agent.pid) return;
   try { process.kill(agent.pid, "SIGTERM"); } catch { /* já encerrado */ }
+}
+
+function restartAgent(agent) {
+  if (isPm2Available()) {
+    try {
+      execSync(`pm2 restart ${agent.name}`, {
+        cwd: __dirname, encoding: "utf8", stdio: "pipe", timeout: 5000,
+      });
+      return;
+    } catch { /* fallback abaixo */ }
+  }
+  stopAgent(agent);
+  setTimeout(() => startAgent(agent), 1000);
 }
 
 // ─── Teclado ──────────────────────────────────────────────────────────────────
@@ -377,6 +443,12 @@ function handleKey(buf) {
       const ag = agentData[selectedIdx];
       mode = ag.running ? "confirm-stop" : "confirm-start";
       render();
+    } else if (key === "r" || key === "R") {         // Restart
+      const ag = agentData[selectedIdx];
+      if (ag.running) {
+        mode = "confirm-restart";
+        render();
+      }
     } else if (key === "q" || key === "Q") {
       exit();
     }
@@ -386,10 +458,11 @@ function handleKey(buf) {
   // Modos de confirmação
   if (key === "s" || key === "S") {
     const ag = agentData[selectedIdx];
-    if (mode === "confirm-start" && !ag.running) startAgent(ag);
-    if (mode === "confirm-stop"  &&  ag.running) stopAgent(ag);
+    if (mode === "confirm-start"   && !ag.running) startAgent(ag);
+    if (mode === "confirm-stop"    &&  ag.running) stopAgent(ag);
+    if (mode === "confirm-restart" &&  ag.running) restartAgent(ag);
     mode = "view";
-    setTimeout(() => { fetchAll(); render(); }, 900);
+    setTimeout(() => { fetchAll(); render(); }, 1200);
   } else if (key === "n" || key === "N" || key === "\x1b") {
     mode = "view";
     render();
