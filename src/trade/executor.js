@@ -144,6 +144,19 @@ if (!TRADE_MOCK) {
 
   const provider = new JsonRpcProvider(CONFIG.chainlink.polygonRpcUrl);
   const wallet   = new Wallet(normalizePrivateKey(pk), provider);
+
+  // Shim de compatibilidade: o SDK @polymarket/clob-client usa a API do ethers v5
+  // (_signTypedData), mas este projeto usa ethers v6 (signTypedData sem underscore).
+  // Sem este shim, TODA ordem falha silenciosamente com:
+  //   "this.signer._signTypedData is not a function"
+  if (typeof wallet._signTypedData !== "function") {
+    wallet._signTypedData = (domain, types, value) =>
+      wallet.signTypedData(domain, types, value);
+    process.stderr.write(
+      `${ANSI.yellow}[executor] Shim _signTypedData → signTypedData aplicado (ethers v5→v6).${ANSI.reset}\n`
+    );
+  }
+
   const creds    = loadApiCreds();
 
   signerWallet   = wallet;
