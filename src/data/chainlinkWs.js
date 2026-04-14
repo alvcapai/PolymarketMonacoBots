@@ -1,9 +1,9 @@
 import WebSocket from "ws";
-import { ethers } from "ethers";
+import { id as ethersId, toBigInt } from "ethers";
 import { CONFIG } from "../config.js";
 import { wsAgentForUrl } from "../net/proxy.js";
 
-const ANSWER_UPDATED_TOPIC0 = ethers.id("AnswerUpdated(int256,uint256,uint256)");
+const ANSWER_UPDATED_TOPIC0 = ethersId("AnswerUpdated(int256,uint256,uint256)");
 
 function getWssCandidates() {
   const fromList = Array.isArray(CONFIG.chainlink.polygonWssUrls) ? CONFIG.chainlink.polygonWssUrls : [];
@@ -13,7 +13,7 @@ function getWssCandidates() {
 }
 
 function hexToSignedBigInt(hex) {
-  const x = ethers.toBigInt(hex);
+  const x = toBigInt(hex);
   const TWO_255 = 1n << 255n;
   const TWO_256 = 1n << 256n;
   return x >= TWO_255 ? x - TWO_256 : x;
@@ -122,7 +122,7 @@ export function startChainlinkPriceStream({
         const answer = hexToSignedBigInt(topics[1]);
         const price = toNumber(answer) / 10 ** Number(decimals);
         const updatedAtHex = typeof log.data === "string" ? log.data : null;
-        const updatedAt = updatedAtHex ? toNumber(ethers.toBigInt(updatedAtHex)) : null;
+        const updatedAt = updatedAtHex ? toNumber(toBigInt(updatedAtHex)) : null;
 
         lastPrice = Number.isFinite(price) ? price : lastPrice;
         lastUpdatedAt = updatedAt ? updatedAt * 1000 : lastUpdatedAt;
