@@ -335,7 +335,10 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
       `${ANSI.yellow}[executor] Preço ajustado para tick mínimo: ${price} → ${roundedPrice}${ANSI.reset}\n`
     );
   }
-  const shareSize = usdcSize / roundedPrice;
+  // Arredondar shares para CIMA com 2 casas decimais.
+  // Divisão simples pode gerar notional ligeiramente abaixo do mínimo ($1):
+  //   ex: 1.00 / 0.53 = 1.8867... → API computa $0.9964 → rejeita "min size: $1"
+  const shareSize = Math.ceil((usdcSize / roundedPrice) * 100) / 100;
 
   // ── Mock Mode ────────────────────────────────────────────────────────────
   if (TRADE_MOCK) {
