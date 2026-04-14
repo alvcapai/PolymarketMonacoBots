@@ -310,7 +310,15 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
   if (usdcSize <= 0)            throw new Error("[executor] sizeUsdc deve ser > 0.");
   if (price <= 0 || price >= 1) throw new Error("[executor] limitPrice deve estar entre 0 e 1 (exclusive).");
 
-  const shareSize = usdcSize / price;
+  // Arredondar para o tick mínimo do Polymarket (0.01 = 1 centavo)
+  // Preços com mais casas decimais causam rejeição silenciosa por "invalid tick size"
+  const roundedPrice = Math.round(price * 100) / 100;
+  if (roundedPrice !== price) {
+    process.stderr.write(
+      `${ANSI.yellow}[executor] Preço ajustado para tick mínimo: ${price} → ${roundedPrice}${ANSI.reset}\n`
+    );
+  }
+  const shareSize = usdcSize / roundedPrice;
 
   // ── Mock Mode ────────────────────────────────────────────────────────────
   if (TRADE_MOCK) {
@@ -332,19 +340,46 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
   const order = await clobClient.createOrder({
     tokenID:    tokenId,
     side:       Side.BUY,
-    price,
+    price:      roundedPrice,
     size:       shareSize,
     feeRateBps: 0,
   });
 
+  // ATENÇÃO: clobClient.postOrder() NUNCA lança exceção — em falha de API retorna
+  // { error: "..." } silenciosamente (ver http-helpers/index.js do SDK).
+  // É obrigatório checar o retorno explicitamente.
+  let response;
   try {
-    const response = await clobClient.postOrder(order, OrderType.GTC);
-    process.stderr.write(`${ANSI.green}[EXECUCAO] Ordem enviada com sucesso.${ANSI.reset}\n`);
-    return response;
+    response = await clobClient.postOrder(order, OrderType.GTC);
   } catch (err) {
-    process.stderr.write(`${ANSI.red}[EXECUCAO] Falha ao enviar ordem: ${err?.message ?? String(err)}${ANSI.reset}\n`);
+    // Raro: só ocorre se createOrder ou a serialização da ordem falhar localmente
+    const detail = err?.message ?? String(err);
+    process.stderr.write(`${ANSI.red}[EXECUCAO] Exceção local ao enviar ordem: ${detail}${ANSI.reset}\n`);
     throw err;
   }
+
+  // Detectar rejeição silenciosa da API (retorno { error: ... } sem throw)
+  if (response && typeof response === "object" && ("error" in response || "errorCode" in response)) {
+    const apiError = response.error ?? response.errorCode ?? JSON.stringify(response);
+    const detail = typeof apiError === "object" ? JSON.stringify(apiError) : String(apiError);
+    process.stderr.write(
+      `${ANSI.red}[EXECUCAO] API rejeitou a ordem — resposta completa: ${JSON.stringify(response)}${ANSI.reset}\n`
+    );
+    throw new Error(`[executor] API rejeitou a ordem: ${detail}`);
+  }
+
+  // Verificar se a resposta tem o shape esperado de uma ordem aceita
+  if (!response || typeof response !== "object") {
+    process.stderr.write(
+      `${ANSI.red}[EXECUCAO] Resposta inesperada da API: ${JSON.stringify(response)}${ANSI.reset}\n`
+    );
+    throw new Error(`[executor] Resposta inesperada da API: ${JSON.stringify(response)}`);
+  }
+
+  process.stderr.write(
+    `${ANSI.green}[EXECUCAO] Ordem aceita pela API. Resposta: ${JSON.stringify(response)}${ANSI.reset}\n`
+  );
+  return response;
 }
 
 // Exporta o endereço de saque padrão para o index.js poder usar

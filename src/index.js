@@ -809,54 +809,76 @@ async function main() {
 
       if (canTradeThisMarket && (extremeLong || extremeShort)) {
         const targetTokenId = extremeLong ? poly.tokens.upTokenId : poly.tokens.downTokenId;
-        const targetPrice   = extremeLong
+        const rawPrice      = extremeLong
           ? (poly.orderbook.up.bestAsk   ?? poly.prices.up)
           : (poly.orderbook.down.bestAsk ?? poly.prices.down);
         const targetProbability = extremeLong ? pLongPct : pShortPct;
         const targetSide = extremeLong ? "LONG" : "SHORT";
 
+        // Slippage: somar 1 tick (0.01) ao bestAsk para aumentar chance de fill.
+        // O order book é lido segundos antes do envio — o mercado pode ter movido.
+        // Cap em 0.97 para não pagar acima do valor justo. Configurável via TRADE_SLIPPAGE.
+        const SLIPPAGE = Math.abs(Number(process.env.TRADE_SLIPPAGE ?? 0.01));
+        const rawPriceNum = Number(rawPrice);
+        const targetPrice = Number.isFinite(rawPriceNum)
+          ? Math.min(Math.round((rawPriceNum + SLIPPAGE) * 100) / 100, 0.97)
+          : rawPriceNum;
+
         // ── Gestão de banca dinâmica ────────────────────────────────────────
         const balanceNow  = await refreshBalance();
-        const tradeSizeUsd = balanceNow !== null
-          ? computeTradeSize(balanceNow)
-          : Math.max(Number(process.env.TRADE_SIZE_USDC || "5"), MIN_TRADE_SIZE);
+        let tradeSizeUsd;
+        if (balanceNow !== null) {
+          tradeSizeUsd = computeTradeSize(balanceNow);
+          process.stderr.write(
+            `\x1b[36m[AUTO-TRADE] Saldo USDC: $${balanceNow.toFixed(2)} → tamanho ${(TRADE_PCT * 100).toFixed(0)}%: $${tradeSizeUsd.toFixed(2)}\x1b[0m\n`
+          );
+        } else {
+          tradeSizeUsd = Math.max(Number(process.env.TRADE_SIZE_USDC || "5"), MIN_TRADE_SIZE);
+          process.stderr.write(
+            `\x1b[33m[AUTO-TRADE] AVISO — saldo USDC não consultado (API indisponível). Usando fallback: $${tradeSizeUsd.toFixed(2)}\x1b[0m\n`
+          );
+        }
 
         // Validações pré-execução com log explícito
         if (!targetTokenId) {
           process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — tokenId do outcome ${targetSide} ausente (mercado: ${marketSlug}).\x1b[0m\n`);
         } else if (tradedTokens.has(targetTokenId)) {
           process.stderr.write(`\x1b[33m[AUTO-TRADE] BLOQUEADO — tokenId ${targetTokenId} já operado nesta sessão.\x1b[0m\n`);
-        } else if (!Number.isFinite(Number(targetPrice)) || Number(targetPrice) <= 0) {
-          process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — preço inválido para ${targetSide}: ${targetPrice} (mercado: ${marketSlug}).\x1b[0m\n`);
-        } else if (!Number.isFinite(tradeSizeUsd) || tradeSizeUsd <= 0) {
-          process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — tamanho de trade inválido: ${tradeSizeUsd} (saldo: ${balanceNow}).\x1b[0m\n`);
+        } else if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
+          process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — preço inválido para ${targetSide}: rawPrice=${rawPrice} (mercado: ${marketSlug}).\x1b[0m\n`);
+        } else if (!Number.isFinite(tradeSizeUsd) || tradeSizeUsd < MIN_TRADE_SIZE) {
+          process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — tamanho de trade abaixo do mínimo: $${tradeSizeUsd} < $${MIN_TRADE_SIZE} (saldo: ${balanceNow}).\x1b[0m\n`);
         } else {
           const isMockMode = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
           process.stderr.write(
             `\x1b[32m[AUTO-TRADE] DISPARANDO ordem ${targetSide}${isMockMode ? " \x1b[33m[MOCK]\x1b[32m" : " \x1b[1m[REAL]\x1b[22m\x1b[32m"}` +
             ` — confiança ${targetProbability.toFixed(1)}%` +
-            ` | tamanho $${tradeSizeUsd.toFixed(2)} | preço ${Number(targetPrice).toFixed(4)} | token ${targetTokenId}\x1b[0m\n`
+            ` | tamanho $${tradeSizeUsd.toFixed(2)} | rawAsk ${rawPriceNum.toFixed(4)} + slippage ${SLIPPAGE} = ${targetPrice.toFixed(2)}` +
+            ` | token ${targetTokenId}\x1b[0m\n`
           );
           try {
+            // Marca token ANTES para evitar disparo duplo concorrente no mesmo ciclo.
+            // Em caso de falha, é removido no catch para permitir nova tentativa.
             tradedTokens.add(targetTokenId);
             await executeTrade(
               targetTokenId,
               "BUY",
               tradeSizeUsd,
-              Number(targetPrice),
+              targetPrice,
               Number(targetProbability)
             );
+            // Só marca mercado como operado APÓS confirmação de sucesso real da API.
             tradedMarketSlugs.add(marketSlug);
-            // Invalidar cache de saldo após trade
             lastBalanceCheckMs = 0;
-            process.stderr.write(`\x1b[32m[AUTO-TRADE] Ordem ${targetSide} executada com sucesso (${marketSlug}).\x1b[0m\n`);
+            process.stderr.write(`\x1b[32m[AUTO-TRADE] Ordem ${targetSide} confirmada pela API (${marketSlug}).\x1b[0m\n`);
           } catch (tradeError) {
-            // Remove token do set para permitir nova tentativa na próxima iteração
+            // Falha real: remove dos sets para permitir nova tentativa no próximo ciclo.
             tradedTokens.delete(targetTokenId);
+            const errMsg = tradeError?.message ?? String(tradeError);
             process.stderr.write(
-              `\x1b[31m[AUTO-TRADE] FALHA ao executar ordem ${targetSide}: ${tradeError?.message ?? String(tradeError)}\x1b[0m\n`
+              `\x1b[31m[AUTO-TRADE] FALHA na ordem ${targetSide} — ${errMsg}\x1b[0m\n` +
+              `\x1b[31m[AUTO-TRADE] Tokens sets limpos — nova tentativa no próximo ciclo com sinal ≥${CONFIG.tradeThreshold}%.\x1b[0m\n`
             );
-            console.error(`[AUTO-TRADE] Erro de execução:`, tradeError);
           }
         }
       }
