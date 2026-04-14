@@ -70,6 +70,13 @@ export const CONFIG = {
   // Trigger threshold (% probability)
   tradeThreshold: ac.tradeThreshold,
 
+  // ── Feature flags de risco (opt-in) ───────────────────────────────────────
+  // ENABLE_RISK_LAYER=true     → ativa bankroll cycle, stake por edge, losing streak
+  // ENABLE_ASSISTANT_SIGNAL_VALIDATION=true → comprime score heurístico antes de usar como prob_modelo
+  // Padrão false preserva o comportamento existente sem nenhuma mudança.
+  enableRiskLayer:          (process.env.ENABLE_RISK_LAYER                      || "false").toLowerCase() === "true",
+  enableSignalValidation:   (process.env.ENABLE_ASSISTANT_SIGNAL_VALIDATION     || "false").toLowerCase() === "true",
+
   // CSV log path — one file per mode
   signalsCsv: `./logs/signals-${ASSET}-${WINDOW}.csv`,
 

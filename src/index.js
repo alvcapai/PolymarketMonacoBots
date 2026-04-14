@@ -28,6 +28,18 @@ import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
 import { executeTrade, fetchUsdcBalance, transferUsdc, WITHDRAWAL_ADDRESS } from "./trade/executor.js";
 import { runAutoRedeem } from "./trade/redeemer.js";
+import { validateAndCalibrateSignal } from "./engines/signal-validation.js";
+import {
+  createBankrollState,
+  syncBankroll,
+  checkWithdrawal,
+  recordWithdrawal,
+  checkCycleFloor,
+  checkEntry,
+  computeStake,
+  recordOpenPosition,
+  formatDiagnostics,
+} from "./engines/risk-management.js";
 const tradedTokens = new Set();
 
 function countVwapCrosses(closes, vwapSeries, lookback) {
@@ -413,12 +425,18 @@ async function main() {
   let prevCurrentPrice = null;
   let priceToBeatState = { slug: null, value: null, setAtMs: null };
 
-  // ── Gestão de banca (Monaco Rule) ───────────────────────────────────────
+  // ── Gestão de banca (Monaco Rule — legado) ──────────────────────────────
+  // Usada quando ENABLE_RISK_LAYER=false (padrão). Preserva comportamento atual.
   const PROFIT_TRIGGER_USD  = 120;   // saldo que aciona o saque
   const WITHDRAWAL_AMOUNT   = 100;   // valor a sacar
   const MIN_TRADE_SIZE      = 1.0;   // mínimo de $1 por ordem (limite da rede)
   const TRADE_PCT           = 0.25;  // 25% do saldo por aposta
   const BALANCE_TTL_MS      = 30_000;
+
+  // ── Estado de banca (nova camada de risco — ENABLE_RISK_LAYER=true) ─────
+  // Encapsula ciclo, losing streak e controle de exposição.
+  // Sincronizado com saldo real a cada refreshBalance().
+  const bankrollState = createBankrollState(20);
 
   let cachedBalance      = null;
   let lastBalanceCheckMs = 0;
@@ -471,29 +489,72 @@ async function main() {
       );
     }
 
-    // ── Monaco Rule: saca automaticamente quando saldo ≥ $120 ─────────────
+    // ── Regra de saque ────────────────────────────────────────────────────
+    // ENABLE_RISK_LAYER=true  → gatilho $150, reset para $50 (nova spec)
+    // ENABLE_RISK_LAYER=false → Monaco Rule legada ($120/$100, comportamento atual)
     const currentBalance = await refreshBalance();
-    if (currentBalance !== null && currentBalance >= PROFIT_TRIGGER_USD && !isWithdrawing) {
-      isWithdrawing = true;
-      console.log(
-        `\n\x1b[1m\x1b[32m╔══════════════════════════════════════════════════════════════╗\x1b[0m\n` +
-        `\x1b[1m\x1b[32m║  SALDO $${currentBalance.toFixed(2)} ≥ $${PROFIT_TRIGGER_USD} — INICIANDO SAQUE AUTOMÁTICO.   ║\x1b[0m\n` +
-        `\x1b[1m\x1b[32m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n` +
-        `\x1b[32m  Transferindo $${WITHDRAWAL_AMOUNT} → ${WITHDRAWAL_ADDRESS}\x1b[0m\n`
-      );
-      try {
-        const result = await transferUsdc(WITHDRAWAL_ADDRESS, WITHDRAWAL_AMOUNT);
-        console.log(
-          `\n\x1b[1m\x1b[32m  ✔  SAQUE AUTOMÁTICO DE $${WITHDRAWAL_AMOUNT} EXECUTADO PARA CARTEIRA SEGURA.\x1b[0m\n` +
-          `\x1b[32m     Tx: ${result.txHash ?? "(mock)"}\x1b[0m\n`
+
+    if (CONFIG.enableRiskLayer) {
+      // Sincroniza estado de banca com saldo real antes de qualquer checagem
+      syncBankroll(bankrollState, currentBalance);
+
+      // Verifica floor de ciclo
+      const floorCheck = checkCycleFloor(bankrollState);
+      if (floorCheck.cycleEnded) {
+        process.stderr.write(
+          `\x1b[31m[RISK] Ciclo ${bankrollState.cycleNumber} encerrado — ${floorCheck.reason}. Novas entradas bloqueadas.\x1b[0m\n`
         );
-        // Atualiza cache de saldo sem forçar novo fetch — aproximação pós-saque
-        cachedBalance      = Math.max((cachedBalance ?? currentBalance) - WITHDRAWAL_AMOUNT, 0);
-        lastBalanceCheckMs = Date.now();
-      } catch (withdrawErr) {
-        console.error(`\x1b[31m[SAQUE] Falha na transferência: ${withdrawErr?.message ?? String(withdrawErr)}\x1b[0m`);
-      } finally {
-        isWithdrawing = false;
+      }
+
+      // Saque automático quando bankroll >= $150
+      const withdrawalCheck = checkWithdrawal(bankrollState);
+      if (withdrawalCheck.shouldWithdraw && !isWithdrawing) {
+        isWithdrawing = true;
+        const { withdrawAmount, resetTo } = withdrawalCheck;
+        console.log(
+          `\n\x1b[1m\x1b[32m╔══════════════════════════════════════════════════════════════╗\x1b[0m\n` +
+          `\x1b[1m\x1b[32m║  SALDO $${(bankrollState.bankroll).toFixed(2)} ≥ $150 — INICIANDO SAQUE AUTOMÁTICO.        ║\x1b[0m\n` +
+          `\x1b[1m\x1b[32m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n` +
+          `\x1b[32m  Transferindo $${withdrawAmount} → ${WITHDRAWAL_ADDRESS} (reset banca → $${resetTo})\x1b[0m\n`
+        );
+        try {
+          const result = await transferUsdc(WITHDRAWAL_ADDRESS, withdrawAmount);
+          console.log(
+            `\n\x1b[1m\x1b[32m  ✔  SAQUE $${withdrawAmount} EXECUTADO — banca resetada para $${resetTo} (ciclo ${bankrollState.cycleNumber + 1}).\x1b[0m\n` +
+            `\x1b[32m     Tx: ${result.txHash ?? "(mock)"}\x1b[0m\n`
+          );
+          recordWithdrawal(bankrollState);
+          cachedBalance      = resetTo;
+          lastBalanceCheckMs = Date.now();
+        } catch (withdrawErr) {
+          console.error(`\x1b[31m[SAQUE] Falha na transferência: ${withdrawErr?.message ?? String(withdrawErr)}\x1b[0m`);
+        } finally {
+          isWithdrawing = false;
+        }
+      }
+    } else {
+      // ── Monaco Rule legada: saca quando saldo >= $120 ──────────────────
+      if (currentBalance !== null && currentBalance >= PROFIT_TRIGGER_USD && !isWithdrawing) {
+        isWithdrawing = true;
+        console.log(
+          `\n\x1b[1m\x1b[32m╔══════════════════════════════════════════════════════════════╗\x1b[0m\n` +
+          `\x1b[1m\x1b[32m║  SALDO $${currentBalance.toFixed(2)} ≥ $${PROFIT_TRIGGER_USD} — INICIANDO SAQUE AUTOMÁTICO.   ║\x1b[0m\n` +
+          `\x1b[1m\x1b[32m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n` +
+          `\x1b[32m  Transferindo $${WITHDRAWAL_AMOUNT} → ${WITHDRAWAL_ADDRESS}\x1b[0m\n`
+        );
+        try {
+          const result = await transferUsdc(WITHDRAWAL_ADDRESS, WITHDRAWAL_AMOUNT);
+          console.log(
+            `\n\x1b[1m\x1b[32m  ✔  SAQUE AUTOMÁTICO DE $${WITHDRAWAL_AMOUNT} EXECUTADO PARA CARTEIRA SEGURA.\x1b[0m\n` +
+            `\x1b[32m     Tx: ${result.txHash ?? "(mock)"}\x1b[0m\n`
+          );
+          cachedBalance      = Math.max((cachedBalance ?? currentBalance) - WITHDRAWAL_AMOUNT, 0);
+          lastBalanceCheckMs = Date.now();
+        } catch (withdrawErr) {
+          console.error(`\x1b[31m[SAQUE] Falha na transferência: ${withdrawErr?.message ?? String(withdrawErr)}\x1b[0m`);
+        } finally {
+          isWithdrawing = false;
+        }
       }
     }
 
@@ -838,22 +899,64 @@ async function main() {
           ? Math.min(Math.round((rawPriceNum + SLIPPAGE) * 100) / 100, 0.97)
           : rawPriceNum;
 
-        // ── Gestão de banca dinâmica ────────────────────────────────────────
-        const balanceNow  = await refreshBalance();
+        // ── Sizing: seleciona legado ou nova camada de risco ─────────────────
+        const balanceNow = await refreshBalance();
         let tradeSizeUsd;
-        if (balanceNow !== null) {
-          tradeSizeUsd = computeTradeSize(balanceNow);
-          process.stderr.write(
-            `\x1b[36m[AUTO-TRADE] Saldo USDC: $${balanceNow.toFixed(2)} → tamanho ${(TRADE_PCT * 100).toFixed(0)}%: $${tradeSizeUsd.toFixed(2)}\x1b[0m\n`
-          );
+
+        if (CONFIG.enableRiskLayer) {
+          // ── Nova camada de risco ────────────────────────────────────────
+          // 1. Validação/calibração do sinal
+          const validatedSignal = CONFIG.enableSignalValidation
+            ? validateAndCalibrateSignal(timeAware.adjustedUp, timeAware.adjustedDown)
+            : { prob_model_up: timeAware.adjustedUp, prob_model_down: timeAware.adjustedDown, warning: "validation_disabled" };
+
+          const probModel   = extremeLong ? validatedSignal.prob_model_up : validatedSignal.prob_model_down;
+          const edgeForSide = extremeLong ? edge.edgeUp : edge.edgeDown;
+          const mktProbSide = extremeLong ? edge.marketUp : edge.marketDown;
+
+          if (validatedSignal.warning && validatedSignal.warning !== "validation_disabled") {
+            process.stderr.write(`\x1b[90m[SIGNAL-VALIDATION] ${validatedSignal.warning}\x1b[0m\n`);
+          }
+
+          // 2. Verifica ciclo encerrado
+          if (bankrollState.cycleEnded) {
+            process.stderr.write(`\x1b[31m[RISK] Entrada bloqueada — ciclo encerrado (banca insuficiente).\x1b[0m\n`);
+            tradeSizeUsd = 0; // garante que não entra
+          } else {
+            // 3. Calcula stake
+            syncBankroll(bankrollState, balanceNow);
+            tradeSizeUsd = computeStake(bankrollState, edgeForSide ?? 0);
+
+            // 4. Verifica todas as condições de entrada
+            const entryCheck = checkEntry(bankrollState, probModel, edgeForSide ?? 0);
+
+            process.stderr.write(
+              `\x1b[36m[RISK] ${formatDiagnostics(bankrollState, probModel, edgeForSide, mktProbSide, tradeSizeUsd)}\x1b[0m\n`
+            );
+
+            if (!entryCheck.canEnter) {
+              process.stderr.write(
+                `\x1b[33m[RISK] Entrada recusada — ${entryCheck.reason} (${targetSide})\x1b[0m\n`
+              );
+              tradeSizeUsd = 0; // bloqueia a execução abaixo
+            }
+          }
         } else {
-          tradeSizeUsd = Math.max(Number(process.env.TRADE_SIZE_USDC || "5"), MIN_TRADE_SIZE);
-          process.stderr.write(
-            `\x1b[33m[AUTO-TRADE] AVISO — saldo USDC não consultado (API indisponível). Usando fallback: $${tradeSizeUsd.toFixed(2)}\x1b[0m\n`
-          );
+          // ── Gestão de banca legada: 25% do saldo ───────────────────────
+          if (balanceNow !== null) {
+            tradeSizeUsd = computeTradeSize(balanceNow);
+            process.stderr.write(
+              `\x1b[36m[AUTO-TRADE] Saldo USDC: $${balanceNow.toFixed(2)} → tamanho ${(TRADE_PCT * 100).toFixed(0)}%: $${tradeSizeUsd.toFixed(2)}\x1b[0m\n`
+            );
+          } else {
+            tradeSizeUsd = Math.max(Number(process.env.TRADE_SIZE_USDC || "5"), MIN_TRADE_SIZE);
+            process.stderr.write(
+              `\x1b[33m[AUTO-TRADE] AVISO — saldo USDC não consultado (API indisponível). Usando fallback: $${tradeSizeUsd.toFixed(2)}\x1b[0m\n`
+            );
+          }
         }
 
-        // Validações pré-execução com log explícito
+        // ── Validações pré-execução e envio da ordem ──────────────────────
         if (!targetTokenId) {
           process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — tokenId do outcome ${targetSide} ausente (mercado: ${marketSlug}).\x1b[0m\n`);
         } else if (tradedTokens.has(targetTokenId)) {
@@ -861,7 +964,7 @@ async function main() {
         } else if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
           process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — preço inválido para ${targetSide}: rawPrice=${rawPrice} (mercado: ${marketSlug}).\x1b[0m\n`);
         } else if (!Number.isFinite(tradeSizeUsd) || tradeSizeUsd < MIN_TRADE_SIZE) {
-          process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — tamanho de trade abaixo do mínimo: $${tradeSizeUsd} < $${MIN_TRADE_SIZE} (saldo: ${balanceNow}).\x1b[0m\n`);
+          process.stderr.write(`\x1b[31m[AUTO-TRADE] BLOQUEADO — tamanho de trade abaixo do mínimo: $${tradeSizeUsd?.toFixed(2) ?? tradeSizeUsd} < $${MIN_TRADE_SIZE} (saldo: ${balanceNow}).\x1b[0m\n`);
         } else {
           const isMockMode = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
           process.stderr.write(
@@ -884,6 +987,9 @@ async function main() {
             // Só marca mercado como operado APÓS confirmação de sucesso real da API.
             tradedMarketSlugs.add(marketSlug);
             lastBalanceCheckMs = 0;
+            if (CONFIG.enableRiskLayer) {
+              recordOpenPosition(bankrollState, tradeSizeUsd);
+            }
             process.stderr.write(`\x1b[32m[AUTO-TRADE] Ordem ${targetSide} confirmada pela API (${marketSlug}).\x1b[0m\n`);
           } catch (tradeError) {
             // Falha real: remove dos sets para permitir nova tentativa no próximo ciclo.
