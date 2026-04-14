@@ -1,4 +1,4 @@
-import { ethers } from "ethers";
+import { Interface } from "ethers";
 import { CONFIG } from "../config.js";
 
 const AGGREGATOR_ABI = [
@@ -6,7 +6,7 @@ const AGGREGATOR_ABI = [
   "function decimals() view returns (uint8)"
 ];
 
-const iface = new ethers.Interface(AGGREGATOR_ABI);
+const iface = new Interface(AGGREGATOR_ABI);
 
 let preferredRpcUrl = null;
 
