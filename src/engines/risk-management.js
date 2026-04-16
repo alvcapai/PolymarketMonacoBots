@@ -12,7 +12,7 @@ export const MIN_TRADE_SIZE = 1.0;
 
 const CYCLE_FLOOR = {
   initial: 5,
-  recurring: 5
+  recurring: 10
 };
 
 function recalcExposure(state) {
