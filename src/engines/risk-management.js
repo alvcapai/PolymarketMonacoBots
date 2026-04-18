@@ -9,10 +9,11 @@ export const WITHDRAWAL_TRIGGER = 150;
 export const WITHDRAWAL_AMOUNT = 100;
 export const BANKROLL_RESET_TO = 50;
 export const MIN_TRADE_SIZE = 1.0;
+export const SESSION_CEILING = 25.0;
 
 const CYCLE_FLOOR = {
-  initial: 0,
-  recurring: 0
+  initial: 15,
+  recurring: 15
 };
 
 function recalcExposure(state) {
@@ -146,6 +147,13 @@ export function decideEntry(state, {
 
   if (state.cycleEnded) {
     return { canEnter: false, reason: "cycle_ended", side, probModel, probMarket, edge, edgeUp, edgeDown, stake: 0 };
+  }
+  if (state.bankroll >= SESSION_CEILING) {
+    return {
+      canEnter: false,
+      reason: `bankroll_${state.bankroll.toFixed(2)}_at_or_above_ceiling_${SESSION_CEILING}`,
+      side, probModel, probMarket, edge, edgeUp, edgeDown, stake: 0
+    };
   }
   if (state.paused) {
     return { canEnter: false, reason: "paused_losing_streak_5", side, probModel, probMarket, edge, edgeUp, edgeDown, stake: 0 };
