@@ -403,5 +403,84 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
   return response;
 }
 
+/**
+ * Executa (ou simula) uma ordem de VENDA no Polymarket CLOB.
+ * Usada pelo take-profit para liquidar posições antes do settlement.
+ *
+ * @param {string} tokenId    Token ID do outcome a vender
+ * @param {number} shareSize  Quantidade de shares a vender
+ * @param {number} limitPrice Preço-limite (0–1), ex: 0.80 → 80c
+ */
+export async function executeSell(tokenId, shareSize, limitPrice) {
+  const token = String(tokenId ?? "").trim();
+  if (!token) throw new Error("[executor] tokenId ausente ou vazio para SELL.");
+
+  const size  = assertFinite(shareSize, "shareSize");
+  const price = assertFinite(limitPrice, "limitPrice");
+
+  if (size <= 0)              throw new Error("[executor] shareSize deve ser > 0.");
+  if (price <= 0 || price >= 1) throw new Error("[executor] limitPrice deve estar entre 0 e 1 (exclusive).");
+
+  const roundedPrice = Math.round(price * 100) / 100;
+  if (roundedPrice !== price) {
+    process.stderr.write(
+      `${ANSI.yellow}[executor] Preço SELL ajustado para tick mínimo: ${price} → ${roundedPrice}${ANSI.reset}\n`
+    );
+  }
+
+  const roundedSize = Math.floor(size * 100) / 100;
+
+  if (TRADE_MOCK) {
+    process.stderr.write(
+      `${ANSI.yellow}[MOCK SELL] ${roundedSize} shares do Token ${token.slice(0, 20)}... ` +
+      `a ${formatCents(roundedPrice)} [MOCK]${ANSI.reset}\n`
+    );
+    return { success: true, mock: true, tokenId: token, side: "SELL", shareSize: roundedSize, price: roundedPrice };
+  }
+
+  process.stderr.write(
+    `${ANSI.green}[EXECUCAO] Vendendo ${roundedSize} shares do Token ${token.slice(0, 20)}... ` +
+    `a ${formatCents(roundedPrice)}${ANSI.reset}\n`
+  );
+
+  const order = await clobClient.createOrder({
+    tokenID:    token,
+    side:       Side.SELL,
+    price:      roundedPrice,
+    size:       roundedSize,
+    feeRateBps: 1000,
+  });
+
+  let response;
+  try {
+    response = await clobClient.postOrder(order, OrderType.GTC);
+  } catch (err) {
+    const detail = err?.message ?? String(err);
+    process.stderr.write(`${ANSI.red}[EXECUCAO] Exceção local ao enviar ordem SELL: ${detail}${ANSI.reset}\n`);
+    throw err;
+  }
+
+  if (response && typeof response === "object" && ("error" in response || "errorCode" in response)) {
+    const apiError = response.error ?? response.errorCode ?? JSON.stringify(response);
+    const detail = typeof apiError === "object" ? JSON.stringify(apiError) : String(apiError);
+    process.stderr.write(
+      `${ANSI.red}[EXECUCAO] API rejeitou a ordem SELL — resposta completa: ${JSON.stringify(response)}${ANSI.reset}\n`
+    );
+    throw new Error(`[executor] API rejeitou a ordem SELL: ${detail}`);
+  }
+
+  if (!response || typeof response !== "object") {
+    process.stderr.write(
+      `${ANSI.red}[EXECUCAO] Resposta inesperada da API (SELL): ${JSON.stringify(response)}${ANSI.reset}\n`
+    );
+    throw new Error(`[executor] Resposta inesperada da API (SELL): ${JSON.stringify(response)}`);
+  }
+
+  process.stderr.write(
+    `${ANSI.green}[EXECUCAO] Ordem SELL aceita pela API. Resposta: ${JSON.stringify(response)}${ANSI.reset}\n`
+  );
+  return response;
+}
+
 // Exporta o endereço de saque padrão para o index.js poder usar
 export { WITHDRAWAL_ADDRESS };

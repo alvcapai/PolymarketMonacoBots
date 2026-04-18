@@ -38,6 +38,7 @@ import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
 import { executeTrade, fetchUsdcBalance, transferUsdc, WITHDRAWAL_ADDRESS } from "./trade/executor.js";
 import { runAutoRedeem } from "./trade/redeemer.js";
+import { checkTakeProfit } from "./trade/take-profit.js";
 import {
   createTradeId,
   recordTradeOpen,
@@ -63,6 +64,7 @@ const ANSI = {
 
 const BALANCE_TTL_MS = 30_000;
 const REDEEM_INTERVAL_MS = 2 * 60 * 1000;
+const TAKE_PROFIT_INTERVAL_MS = 10 * 1000;
 const LABEL_W = 18;
 const MODEL_VERSION = "v1-edge-calibrated";
 
@@ -292,6 +294,44 @@ async function fetchPolymarketSnapshot() {
   };
 }
 
+function processOutcomeEvents(bankrollState, events) {
+  for (const event of events) {
+    const outcome = recordOutcomeByToken(bankrollState, event.tokenId, event.won);
+    if (!outcome.updated) continue;
+
+    const position = outcome.position ?? {};
+    const tradeId = String(position.tradeId ?? "").trim();
+    if (tradeId) {
+      const pnlRealized = estimatePnlRealized({
+        stake: position.stakeUsed ?? outcome.stakeUsed,
+        entryPrice: position.entryPrice,
+        shareSize: position.shareSize,
+        won: event.won
+      });
+
+      recordTradeClose({
+        trade_id: tradeId,
+        timestamp_close: new Date().toISOString(),
+        result: event.won ? "WIN" : "LOSS",
+        won: event.won ? 1 : 0,
+        close_reason: event.closeReason ?? event.source ?? (event.won ? "settled_win" : "settled_loss"),
+        redeemed: event.redeemed === true,
+        market_settlement_price: event.marketSettlementPrice ?? null,
+        bankroll_after: bankrollState.bankroll,
+        open_positions_after: bankrollState.openPositions,
+        total_exposure_after: bankrollState.totalExposure,
+        losing_streak_after: bankrollState.losingStreak,
+        pnl_realized: pnlRealized
+      });
+    }
+
+    process.stderr.write(
+      `\x1b[35m[OUTCOME] ${event.won ? "WIN" : "LOSS"} token ${event.tokenId} | ` +
+      `stake $${outcome.stakeUsed.toFixed(2)} | losingStreak=${bankrollState.losingStreak}\x1b[0m\n`
+    );
+  }
+}
+
 async function main() {
   const binanceStream = startBinanceTradeStream({ symbol: CONFIG.symbol });
   const polymarketLiveStream = startPolymarketChainlinkPriceStream({
@@ -306,6 +346,7 @@ async function main() {
   let cachedBalance = null;
   let lastBalanceCheckMs = 0;
   let lastRedeemCheckMs = 0;
+  let lastTakeProfitCheckMs = 0;
   let prevSpotPrice = null;
   let prevCurrentPrice = null;
   let isWithdrawing = false;
@@ -348,42 +389,7 @@ async function main() {
       if (nowMs - lastRedeemCheckMs >= REDEEM_INTERVAL_MS) {
         lastRedeemCheckMs = nowMs;
         const report = await runAutoRedeem();
-        const events = Array.isArray(report?.events) ? report.events : [];
-        for (const event of events) {
-          const outcome = recordOutcomeByToken(bankrollState, event.tokenId, event.won);
-          if (outcome.updated) {
-            const position = outcome.position ?? {};
-            const tradeId = String(position.tradeId ?? "").trim();
-            if (tradeId) {
-              const pnlRealized = estimatePnlRealized({
-                stake: position.stakeUsed ?? outcome.stakeUsed,
-                entryPrice: position.entryPrice,
-                shareSize: position.shareSize,
-                won: event.won
-              });
-
-              recordTradeClose({
-                trade_id: tradeId,
-                timestamp_close: new Date().toISOString(),
-                result: event.won ? "WIN" : "LOSS",
-                won: event.won ? 1 : 0,
-                close_reason: event.closeReason ?? event.source ?? (event.won ? "settled_win" : "settled_loss"),
-                redeemed: event.redeemed === true,
-                market_settlement_price: event.marketSettlementPrice ?? null,
-                bankroll_after: bankrollState.bankroll,
-                open_positions_after: bankrollState.openPositions,
-                total_exposure_after: bankrollState.totalExposure,
-                losing_streak_after: bankrollState.losingStreak,
-                pnl_realized: pnlRealized
-              });
-            }
-
-            process.stderr.write(
-              `\x1b[35m[OUTCOME] ${event.won ? "WIN" : "LOSS"} token ${event.tokenId} | ` +
-              `stake $${outcome.stakeUsed.toFixed(2)} | losingStreak=${bankrollState.losingStreak}\x1b[0m\n`
-            );
-          }
-        }
+        processOutcomeEvents(bankrollState, Array.isArray(report?.events) ? report.events : []);
       }
 
       const currentBalance = await refreshBalance();
@@ -443,6 +449,12 @@ async function main() {
       const settlementMs = poly.ok && poly.market?.endDate ? new Date(poly.market.endDate).getTime() : null;
       const settlementLeftMin = settlementMs ? (settlementMs - Date.now()) / 60_000 : null;
       const timeLeftMin = settlementLeftMin ?? timing.remainingMinutes;
+
+      if (Date.now() - lastTakeProfitCheckMs >= TAKE_PROFIT_INTERVAL_MS) {
+        lastTakeProfitCheckMs = Date.now();
+        const tpReport = await checkTakeProfit(bankrollState, { settlementLeftMin });
+        processOutcomeEvents(bankrollState, Array.isArray(tpReport?.events) ? tpReport.events : []);
+      }
 
       const closes = klines1m.map((c) => c.close);
       const vwapSeries = computeVwapSeries(klines1m);

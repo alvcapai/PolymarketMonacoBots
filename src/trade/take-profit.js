@@ -1,6 +1,6 @@
 import { executeSell } from "./executor.js";
 
-export const TAKE_PROFIT_THRESHOLD = 0.75; // 75% gain on entry price
+export const TAKE_PROFIT_THRESHOLD = 0.50; // 50% gain on entry price
 const MIN_TIME_LEFT_MIN = 2;               // don't sell in last 2 min (let it settle for $1)
 const CLOB_HOST = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
 const TRADE_MOCK = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
