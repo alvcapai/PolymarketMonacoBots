@@ -32,7 +32,6 @@ import { scoreDirection, applyTimeAwareness } from "./engines/probability.js";
 import { computeEdge } from "./engines/edge.js";
 import { calibrateModelProbabilities } from "./engines/signal-validation.js";
 import {
-  createBankrollState,
   syncBankroll,
   checkWithdrawal,
   recordWithdrawal,
@@ -44,6 +43,7 @@ import {
   MIN_TRADE_SIZE,
   MAX_EXPOSURE_PCT,
 } from "./engines/risk-management.js";
+import { saveBankrollState, loadBankrollState } from "./engines/bankroll-persist.js";
 import { appendCsvRow, formatNumber, formatPct, getCandleWindowTiming, sleep } from "./utils.js";
 import { startBinanceTradeStream } from "./data/binanceWs.js";
 import readline from "node:readline";
@@ -317,7 +317,7 @@ async function main() {
     aggregator: CONFIG.chainlink.assetUsdAggregator
   });
 
-  const bankrollState = createBankrollState(20);
+  const bankrollState = loadBankrollState(CONFIG.bankrollStatePath, 20);
 
   const pred5mState  = is5m ? createPrediction5mState()  : null;
   const pred5mConfig = is5m ? createPrediction5mConfig() : null;
@@ -325,10 +325,26 @@ async function main() {
   let cachedBalance = null;
   let lastBalanceCheckMs = 0;
   let lastRedeemCheckMs = 0;
+  let lastPersistMs = 0;
   let prevSpotPrice = null;
   let prevCurrentPrice = null;
   let isWithdrawing = false;
   let wasCycleEnded = false;
+
+  const PERSIST_INTERVAL_MS = 60_000;
+
+  function persistIfDue() {
+    const now = Date.now();
+    if (now - lastPersistMs >= PERSIST_INTERVAL_MS) {
+      lastPersistMs = now;
+      saveBankrollState(bankrollState, CONFIG.bankrollStatePath);
+    }
+  }
+
+  function persistNow() {
+    lastPersistMs = Date.now();
+    saveBankrollState(bankrollState, CONFIG.bankrollStatePath);
+  }
 
   async function refreshBalance() {
     const now = Date.now();
@@ -415,6 +431,7 @@ async function main() {
                 `\x1b[35m[OUTCOME] ${event.won ? "WIN" : "LOSS"} token ${event.tokenId} | ` +
                 `stake $${outcome.stakeUsed.toFixed(2)} | losingStreak=${bankrollState.losingStreak}\x1b[0m\n`
               );
+              persistNow();
             }
           }
         }
@@ -422,6 +439,7 @@ async function main() {
 
       const currentBalance = await refreshBalance();
       syncBankroll(bankrollState, currentBalance);
+      persistIfDue();
 
       const floorCheck = checkCycleFloor(bankrollState);
       if (floorCheck.cycleEnded && !wasCycleEnded) {
@@ -444,6 +462,7 @@ async function main() {
           recordWithdrawal(bankrollState);
           cachedBalance = resetTo;
           lastBalanceCheckMs = Date.now();
+          persistNow();
           process.stderr.write(
             `\x1b[32m[SAQUE] Concluido. Tx: ${result.txHash ?? "(mock)"} | novo ciclo=${bankrollState.cycleNumber}\x1b[0m\n`
           );
@@ -821,6 +840,7 @@ async function main() {
               marketEndDateMs: settlementMs,
             });
             if (is5m && pred5mState) pred5mState.hasOpenPosition = true;
+            persistNow();
 
             recordTradeOpen({
               trade_id:        tradeId,

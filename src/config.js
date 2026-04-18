@@ -68,6 +68,7 @@ export const CONFIG = {
   // CSV log paths — one file per mode
   signalsCsv:          `./logs/signals-${ASSET}-${WINDOW}.csv`,
   mockCalibrationCsv:  `./logs/mock-calibration-${ASSET}-${WINDOW}.csv`,
+  bankrollStatePath:   `./logs/bankroll-${ASSET}-${WINDOW}.json`,
 
   polymarket: {
     marketSlug:      process.env.POLYMARKET_SLUG || "",
