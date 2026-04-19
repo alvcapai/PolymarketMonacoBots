@@ -2,7 +2,7 @@ export const MIN_NET_EDGE = 0.03; // was MIN_EDGE = 0.05; lowered because we now
 export const MAX_EDGE = 0.50;
 const TAKER_FEE_BPS = 156; // conservative upper bound for 15m market taker fee (~1.56%)
 export const MIN_PROB = 0.54;
-export const MIN_MARKET_PROB = 0.55;
+export const MIN_MARKET_PROB = 0.50;
 const MAX_STAKE_PCT = 0.05;      // 5% of bankroll
 const MAX_STAKE_ABSOLUTE = 10.0; // hard cap regardless of bankroll size
 export const MAX_POSITIONS = 1;
