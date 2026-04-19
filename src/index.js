@@ -46,12 +46,16 @@ import {
   recordTradeClose,
   estimatePnlRealized
 } from "./engines/trade-telemetry.js";
+import { logCounterfactual } from "./logging/counterfactual-log.js";
 
 applyGlobalProxyFromEnv();
 
 const tradedTokens = new Set();
 const tradedMarketSlugs = new Set();
 let isPlacingOrder = false;
+
+// Rolling 30-candle history of (binanceClose − chainlinkPrice) for basis monitoring.
+const basisHistory = [];
 
 const ANSI = {
   reset: "\x1b[0m",
@@ -501,9 +505,31 @@ async function main() {
         ? closes[closes.length - 1] < vwapNow && closes[closes.length - 2] > vwapSeries[vwapSeries.length - 2]
         : false;
 
+      // Basis tracking: Chainlink is the settlement source, Binance is the history source.
+      // Log the spread each cycle; widen VWAP margin when basis is noisy (stddev > $25).
+      const chainlinkPrice = chainlink?.price ?? null;
+      const binanceClose = closes[closes.length - 1];
+      const basisNow = chainlinkPrice !== null ? binanceClose - chainlinkPrice : null;
+      if (basisNow !== null) {
+        basisHistory.push(basisNow);
+        if (basisHistory.length > 30) basisHistory.shift();
+      }
+      let basisStddev = 0;
+      if (basisHistory.length >= 2) {
+        const mean = basisHistory.reduce((a, b) => a + b, 0) / basisHistory.length;
+        const variance = basisHistory.reduce((s, b) => s + (b - mean) ** 2, 0) / basisHistory.length;
+        basisStddev = Math.sqrt(variance);
+      }
+      const vwapMargin = basisStddev > 25 ? 0.5 * basisStddev : 0;
+      process.stderr.write(
+        `\x1b[90m[BASIS] binance=${binanceClose.toFixed(2)} chainlink=${chainlinkPrice?.toFixed(2) ?? "n/a"} ` +
+        `basis=${basisNow?.toFixed(2) ?? "n/a"} stddev=${basisStddev.toFixed(2)} vwapMargin=${vwapMargin.toFixed(2)}\x1b[0m\n`
+      );
+
       const scored = scoreDirection({
-        price: lastPrice,
+        price: chainlinkPrice ?? lastPrice, // Chainlink as primary anchor; fallback to Binance
         vwap: vwapNow,
+        vwapMargin,
         vwapSlope,
         rsi: rsiNow,
         rsiSlope,
@@ -544,8 +570,19 @@ async function main() {
       const signal = toDecisionSignal(decision);
       process.stderr.write(`\x1b[36m[RISK] ${formatDiagnostics(bankrollState, decision)}\x1b[0m\n`);
 
+      logCounterfactual({
+        logDir: "./logs",
+        marketSlug,
+        sideConsidered: decision.side,
+        probModel: decision.probModel,
+        probMarket: decision.probMarket,
+        rawEdge: decision.rawEdge,
+        netEdge: decision.edge,
+        gateThatBlocked: decision.canEnter ? null : decision.reason,
+        wouldHaveStake: decision.stake > 0 ? decision.stake : null
+      });
+
       const spotPrice = wsPrice ?? lastPrice;
-      const currentPrice = chainlink?.price ?? null;
       const decisionColor = decision.canEnter ? ANSI.green : ANSI.yellow;
 
       const lines = [
@@ -572,7 +609,7 @@ async function main() {
         "",
         sepLine(),
         "",
-        colorPriceLine({ label: "Current (Chainlink)", price: currentPrice, prevPrice: prevCurrentPrice, decimals: 2, prefix: "$" }),
+        colorPriceLine({ label: "Current (Chainlink)", price: chainlinkPrice, prevPrice: prevCurrentPrice, decimals: 2, prefix: "$" }),
         colorPriceLine({ label: "Spot (Binance WS)", price: spotPrice, prevPrice: prevSpotPrice, decimals: 0, prefix: "$" }),
         "",
         kv("Bankroll:", `$${bankrollState.bankroll.toFixed(2)} | cycle ${bankrollState.cycleNumber}`),
@@ -586,7 +623,7 @@ async function main() {
 
       renderScreen(lines.join("\n") + "\n");
       prevSpotPrice = spotPrice ?? prevSpotPrice;
-      prevCurrentPrice = currentPrice ?? prevCurrentPrice;
+      prevCurrentPrice = chainlinkPrice ?? prevCurrentPrice;
 
       appendCsvRow(CONFIG.signalsCsv, header, [
         new Date().toISOString(),

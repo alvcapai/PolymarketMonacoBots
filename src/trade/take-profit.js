@@ -1,11 +1,25 @@
 import { executeSell } from "./executor.js";
 
-export const TAKE_PROFIT_THRESHOLD = 0.50; // 50% gain on entry price
-const MIN_TIME_LEFT_MIN = 2;               // don't sell in last 2 min (let it settle for $1)
+const MIN_TIME_LEFT_MIN = 1;       // hold in final 1 min — let settlement pay $1 (was 2)
+const STOP_LOSS_FACTOR = 0.30;     // sell if position dropped to 30% of entry price (−70%)
+const MIN_TIME_FOR_STOP_LOSS = 5;  // don't cut losses if <5 min left — let it settle
 const CLOB_HOST = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
 const TRADE_MOCK = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
 
 const takenProfitTokens = new Set();
+
+// Dynamic sell threshold. All three components return a price level; we sell
+// when currentMidPrice ≥ max of all three.
+// entryPrice, probModel, remainingMinutes — TUNABLE AFTER DATA COLLECTION
+function computeSellThreshold({ entryPrice, probModel, remainingMinutes }) {
+  const remClamped = Math.max(0, Math.min(remainingMinutes ?? 15, 15));
+
+  const minGainFloor = entryPrice * 1.25;             // never exit for <25% gain
+  const modelConvictionCap = (probModel ?? 0.5) + 0.10; // market priced 10¢ above model
+  const timeDecayFloor = 1.0 - (remClamped / 15) * 0.15; // rises from 0.85 → 1.0 as t→0
+
+  return Math.max(minGainFloor, modelConvictionCap, timeDecayFloor);
+}
 
 async function fetchMidPrice(tokenId) {
   try {
@@ -21,13 +35,21 @@ async function fetchMidPrice(tokenId) {
   }
 }
 
+async function doSell(tokenId, shareSize, currentPrice, reason) {
+  process.stderr.write(
+    `\x1b[32m[TAKE-PROFIT] ${reason} token=${tokenId.slice(0, 20)}... ` +
+    `cur=${currentPrice.toFixed(2)} proceeds=$${(currentPrice * shareSize).toFixed(2)}` +
+    `${TRADE_MOCK ? " [MOCK]" : ""}\x1b[0m\n`
+  );
+  if (!TRADE_MOCK) {
+    await executeSell(tokenId, shareSize, currentPrice);
+  }
+}
+
 export async function checkTakeProfit(bankrollState, { settlementLeftMin = null } = {}) {
   const events = [];
   const openPositions = [...bankrollState.positions.entries()];
   if (!openPositions.length) return { events };
-
-  // Near settlement — let the position resolve naturally for full $1 payout
-  if (settlementLeftMin !== null && settlementLeftMin < MIN_TIME_LEFT_MIN) return { events };
 
   for (const [tokenId, pos] of openPositions) {
     if (takenProfitTokens.has(tokenId)) continue;
@@ -39,25 +61,54 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
     const currentPrice = await fetchMidPrice(tokenId);
     if (currentPrice === null || currentPrice <= 0 || currentPrice >= 1) continue;
 
-    const gain = (currentPrice - entryPrice) / entryPrice;
-    if (gain < TAKE_PROFIT_THRESHOLD) continue;
+    const remainingMinutes = settlementLeftMin;
 
-    const proceeds = currentPrice * shareSize;
-
-    process.stderr.write(
-      `\x1b[32m[TAKE-PROFIT] token=${tokenId.slice(0, 20)}... ` +
-      `entry=${entryPrice.toFixed(2)} cur=${currentPrice.toFixed(2)} ` +
-      `gain=${(gain * 100).toFixed(1)}% proceeds=$${proceeds.toFixed(2)}` +
-      `${TRADE_MOCK ? " [MOCK]" : ""}\x1b[0m\n`
+    // Soft stop-loss: free capital if position is deeply underwater with time remaining.
+    const isStopLoss = (
+      currentPrice <= entryPrice * STOP_LOSS_FACTOR &&
+      remainingMinutes !== null &&
+      remainingMinutes >= MIN_TIME_FOR_STOP_LOSS
     );
 
-    if (!TRADE_MOCK) {
+    if (isStopLoss) {
+      const proceeds = currentPrice * shareSize;
       try {
-        await executeSell(tokenId, shareSize, currentPrice);
+        await doSell(tokenId, shareSize, currentPrice, "STOP-LOSS");
       } catch (err) {
-        process.stderr.write(`\x1b[31m[TAKE-PROFIT] Erro ao vender ${tokenId.slice(0, 20)}...: ${err.message}\x1b[0m\n`);
+        process.stderr.write(`\x1b[31m[TAKE-PROFIT] stop-loss sell error ${tokenId.slice(0, 20)}...: ${err.message}\x1b[0m\n`);
         continue;
       }
+      takenProfitTokens.add(tokenId);
+      events.push({
+        tokenId,
+        won: false,
+        closeReason: "stop_loss",
+        redeemed: false,
+        marketSettlementPrice: currentPrice,
+        proceeds,
+        gain: (currentPrice - entryPrice) / entryPrice,
+        source: "take_profit"
+      });
+      continue;
+    }
+
+    // Near settlement — let the position resolve naturally for full $1 payout.
+    if (remainingMinutes !== null && remainingMinutes < MIN_TIME_LEFT_MIN) continue;
+
+    const threshold = computeSellThreshold({
+      entryPrice,
+      probModel: pos.probModel,
+      remainingMinutes
+    });
+
+    if (currentPrice < threshold) continue;
+
+    const proceeds = currentPrice * shareSize;
+    try {
+      await doSell(tokenId, shareSize, currentPrice, `TAKE-PROFIT thresh=${threshold.toFixed(2)}`);
+    } catch (err) {
+      process.stderr.write(`\x1b[31m[TAKE-PROFIT] sell error ${tokenId.slice(0, 20)}...: ${err.message}\x1b[0m\n`);
+      continue;
     }
 
     takenProfitTokens.add(tokenId);
@@ -68,7 +119,7 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
       redeemed: false,
       marketSettlementPrice: currentPrice,
       proceeds,
-      gain,
+      gain: (currentPrice - entryPrice) / entryPrice,
       source: "take_profit"
     });
   }

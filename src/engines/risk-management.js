@@ -3,7 +3,8 @@ export const MAX_EDGE = 0.50;
 const TAKER_FEE_BPS = 156; // conservative upper bound for 15m market taker fee (~1.56%)
 export const MIN_PROB = 0.54;
 export const MIN_MARKET_PROB = 0.55;
-export const MAX_STAKE = 1.00;
+const MAX_STAKE_PCT = 0.05;      // 5% of bankroll
+const MAX_STAKE_ABSOLUTE = 10.0; // hard cap regardless of bankroll size
 export const MAX_POSITIONS = 1;
 export const MAX_EXPOSURE_PCT = 1.0;
 export const WITHDRAWAL_TRIGGER = 150;
@@ -89,6 +90,10 @@ export function checkCycleFloor(state) {
   return { cycleEnded: false, floor, reason: null };
 }
 
+function computeMaxStake(bankroll) {
+  return Math.min(bankroll * MAX_STAKE_PCT, MAX_STAKE_ABSOLUTE);
+}
+
 export function edgeMultiplier(edge) {
   if (!Number.isFinite(edge) || edge < MIN_NET_EDGE) return 0;
   if (edge < 0.06) return 0.4;
@@ -107,12 +112,13 @@ export function computeStake(state, edge) {
   const mult = edgeMultiplier(edge);
   if (mult === 0) return 0;
 
+  const maxStake = computeMaxStake(state.bankroll);
   let stake = stakeBase(state.bankroll) * mult;
   if (state.losingStreak >= 3) {
     stake *= 0.5;
   }
   stake = Math.max(stake, MIN_TRADE_SIZE);
-  return Math.min(stake, MAX_STAKE);
+  return Math.min(stake, maxStake);
 }
 
 export function decideEntry(state, {
@@ -257,17 +263,18 @@ export function decideEntry(state, {
   // Polymarket rejects orders where shares < 5. At high prices this requires
   // a stake above our cap, so we detect and block here rather than letting the
   // API return "Size lower than minimum: 5".
+  const maxStakeNow = computeMaxStake(state.bankroll);
   const tokenPrice = toFiniteOrNull(side === "UP" ? priceUp : priceDown);
   if (tokenPrice !== null && tokenPrice > 0) {
     const minViableStake = MIN_SHARES * tokenPrice * (1 + slippage);
-    if (minViableStake > MAX_STAKE) {
+    if (minViableStake > maxStakeNow) {
       return {
         canEnter: false,
-        reason: `price_${tokenPrice.toFixed(3)}_requires_${minViableStake.toFixed(2)}_above_max_stake_${MAX_STAKE}`,
+        reason: `price_${tokenPrice.toFixed(3)}_requires_${minViableStake.toFixed(2)}_above_max_stake_${maxStakeNow.toFixed(2)}`,
         side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
       };
     }
-    stake = Math.min(Math.max(stake, minViableStake, MIN_TRADE_SIZE), MAX_STAKE);
+    stake = Math.min(Math.max(stake, minViableStake, MIN_TRADE_SIZE), maxStakeNow);
   }
 
   if (!Number.isFinite(stake) || stake < MIN_TRADE_SIZE) {

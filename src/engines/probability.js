@@ -4,6 +4,7 @@ export function scoreDirection(inputs) {
   const {
     price,
     vwap,
+    vwapMargin = 0,  // extra margin (in price units) before counting price vs VWAP as a signal
     vwapSlope,
     rsi,
     rsiSlope,
@@ -17,8 +18,8 @@ export function scoreDirection(inputs) {
   let down = 1;
 
   if (price !== null && vwap !== null) {
-    if (price > vwap) up += 2;
-    if (price < vwap) down += 2;
+    if (price > vwap + vwapMargin) up += 2;
+    if (price < vwap - vwapMargin) down += 2;
   }
 
   if (vwapSlope !== null) {
