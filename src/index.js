@@ -44,7 +44,8 @@ import {
   createTradeId,
   recordTradeOpen,
   recordTradeClose,
-  estimatePnlRealized
+  estimatePnlRealized,
+  recordBlockReason
 } from "./engines/trade-telemetry.js";
 import { logCounterfactual } from "./logging/counterfactual-log.js";
 
@@ -646,6 +647,10 @@ async function main() {
         process.stderr.write(
           `\x1b[90m[AUTO-TRADE] NO TRADE — ${decision.reason} | signal=${signal}\x1b[0m\n`
         );
+        const blockReport = recordBlockReason(decision.reason);
+        if (blockReport) {
+          process.stderr.write(`\x1b[33m[TELEMETRY] ${blockReport}\x1b[0m\n`);
+        }
       } else if (!canTradeThisMarket) {
         const reason = !poly.ok
           ? "mercado Polymarket indisponivel"
