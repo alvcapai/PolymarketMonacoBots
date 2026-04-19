@@ -1,5 +1,6 @@
-export const MIN_EDGE = 0.05;
+export const MIN_NET_EDGE = 0.03; // was MIN_EDGE = 0.05; lowered because we now subtract fees before gating
 export const MAX_EDGE = 0.50;
+const TAKER_FEE_BPS = 156; // conservative upper bound for 15m market taker fee (~1.56%)
 export const MIN_PROB = 0.54;
 export const MIN_MARKET_PROB = 0.55;
 export const MAX_STAKE = 1.00;
@@ -89,7 +90,7 @@ export function checkCycleFloor(state) {
 }
 
 export function edgeMultiplier(edge) {
-  if (!Number.isFinite(edge) || edge < MIN_EDGE) return 0;
+  if (!Number.isFinite(edge) || edge < MIN_NET_EDGE) return 0;
   if (edge < 0.06) return 0.4;
   if (edge < 0.09) return 0.6;
   if (edge < 0.12) return 0.8;
@@ -153,21 +154,29 @@ export function decideEntry(state, {
   const side = edgeUp >= edgeDown ? "UP" : "DOWN";
   const probModel = side === "UP" ? modelUp : modelDown;
   const probMarket = side === "UP" ? mktUp : mktDown;
-  const edge = side === "UP" ? edgeUp : edgeDown;
-  let stake = computeStake(state, edge);
+  const rawEdge = side === "UP" ? edgeUp : edgeDown;
+
+  // Net edge: subtract taker fee + slippage expressed as a probability cost.
+  // cost = (fee + slippage) / (1 - tokenPrice) — approximation of break-even premium.
+  const tokenMarketProb = side === "UP" ? mktUp : mktDown;
+  const denominator = Math.max(1 - tokenMarketProb, 0.01); // guard against price → 1
+  const costAsProb = (TAKER_FEE_BPS / 10000 + slippage) / denominator;
+  const netEdge = rawEdge - costAsProb;
+
+  let stake = computeStake(state, netEdge);
 
   if (state.cycleEnded) {
-    return { canEnter: false, reason: "cycle_ended", side, probModel, probMarket, edge, edgeUp, edgeDown, stake: 0 };
+    return { canEnter: false, reason: "cycle_ended", side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0 };
   }
   if (state.bankroll >= SESSION_CEILING) {
     return {
       canEnter: false,
       reason: `bankroll_${state.bankroll.toFixed(2)}_at_or_above_ceiling_${SESSION_CEILING}`,
-      side, probModel, probMarket, edge, edgeUp, edgeDown, stake: 0
+      side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
     };
   }
   if (state.paused) {
-    return { canEnter: false, reason: "paused_losing_streak_5", side, probModel, probMarket, edge, edgeUp, edgeDown, stake: 0 };
+    return { canEnter: false, reason: "paused_losing_streak_5", side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0 };
   }
   if (state.openPositions >= MAX_POSITIONS) {
     return {
@@ -176,7 +185,8 @@ export function decideEntry(state, {
       side,
       probModel,
       probMarket,
-      edge,
+      edge: netEdge,
+      rawEdge,
       edgeUp,
       edgeDown,
       stake: 0
@@ -191,7 +201,8 @@ export function decideEntry(state, {
           side,
           probModel,
           probMarket,
-          edge,
+          edge: netEdge,
+          rawEdge,
           edgeUp,
           edgeDown,
           stake: 0
@@ -207,7 +218,8 @@ export function decideEntry(state, {
       side,
       probModel,
       probMarket,
-      edge,
+      edge: netEdge,
+      rawEdge,
       edgeUp,
       edgeDown,
       stake: 0
@@ -220,20 +232,22 @@ export function decideEntry(state, {
       side,
       probModel,
       probMarket,
-      edge,
+      edge: netEdge,
+      rawEdge,
       edgeUp,
       edgeDown,
       stake: 0
     };
   }
-  if (edge < MIN_EDGE || edge > MAX_EDGE) {
+  if (netEdge < MIN_NET_EDGE || rawEdge > MAX_EDGE) {
     return {
       canEnter: false,
-      reason: `edge_${edge.toFixed(4)}_out_of_range_${MIN_EDGE}_${MAX_EDGE}`,
+      reason: `net_edge_${netEdge.toFixed(4)}_out_of_range_${MIN_NET_EDGE}_${MAX_EDGE}`,
       side,
       probModel,
       probMarket,
-      edge,
+      edge: netEdge,
+      rawEdge,
       edgeUp,
       edgeDown,
       stake: 0
@@ -250,7 +264,7 @@ export function decideEntry(state, {
       return {
         canEnter: false,
         reason: `price_${tokenPrice.toFixed(3)}_requires_${minViableStake.toFixed(2)}_above_max_stake_${MAX_STAKE}`,
-        side, probModel, probMarket, edge, edgeUp, edgeDown, stake: 0
+        side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
       };
     }
     stake = Math.min(Math.max(stake, minViableStake, MIN_TRADE_SIZE), MAX_STAKE);
@@ -263,7 +277,8 @@ export function decideEntry(state, {
       side,
       probModel,
       probMarket,
-      edge,
+      edge: netEdge,
+      rawEdge,
       edgeUp,
       edgeDown,
       stake: 0
@@ -279,7 +294,8 @@ export function decideEntry(state, {
       side,
       probModel,
       probMarket,
-      edge,
+      edge: netEdge,
+      rawEdge,
       edgeUp,
       edgeDown,
       stake: 0
@@ -292,7 +308,8 @@ export function decideEntry(state, {
     side,
     probModel,
     probMarket,
-    edge,
+    edge: netEdge,
+    rawEdge,
     edgeUp,
     edgeDown,
     stake
@@ -369,7 +386,8 @@ export function formatDiagnostics(state, decision) {
     `side=${decision.side ?? "null"}`,
     `prob_model=${decision.probModel !== null && Number.isFinite(decision.probModel) ? decision.probModel.toFixed(4) : "null"}`,
     `prob_market=${decision.probMarket !== null && Number.isFinite(decision.probMarket) ? decision.probMarket.toFixed(4) : "null"}`,
-    `edge=${decision.edge !== null && Number.isFinite(decision.edge) ? decision.edge.toFixed(4) : "null"}`,
+    `raw_edge=${decision.rawEdge !== null && Number.isFinite(decision.rawEdge) ? decision.rawEdge.toFixed(4) : "null"}`,
+    `net_edge=${decision.edge !== null && Number.isFinite(decision.edge) ? decision.edge.toFixed(4) : "null"}`,
     `stake=$${(decision.stake ?? 0).toFixed(2)}`,
     `decision=${decision.canEnter ? "ENTER" : `NO_TRADE_${decision.reason}`}`,
     `withdrawn=$${(state.totalWithdrawn ?? 0).toFixed(2)}`

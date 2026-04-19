@@ -647,7 +647,7 @@ async function main() {
           process.stderr.write(
             `\x1b[32m[AUTO-TRADE] DISPARANDO ${sideLabel}${isMockMode ? " [MOCK]" : " [REAL]"} | ` +
             `prob_model ${probabilityPct.toFixed(2)}% | prob_market ${(decision.probMarket * 100).toFixed(2)}% | ` +
-            `edge ${(decision.edge * 100).toFixed(2)}% | stake $${decision.stake.toFixed(2)} | ` +
+            `raw_edge ${(decision.rawEdge * 100).toFixed(2)}% net_edge ${(decision.edge * 100).toFixed(2)}% | stake $${decision.stake.toFixed(2)} | ` +
             `rawAsk ${rawPriceNum.toFixed(4)} + slippage ${slippage} = ${targetPrice.toFixed(2)} | token ${targetTokenId}\x1b[0m\n`
           );
 
@@ -690,6 +690,7 @@ async function main() {
               prob_modelo: decision.probModel,
               prob_mercado: decision.probMarket,
               edge: decision.edge,
+              raw_edge: decision.rawEdge,
               stake: decision.stake,
               entry_price: targetPrice,
               adjusted_up: timeAware.adjustedUp,
