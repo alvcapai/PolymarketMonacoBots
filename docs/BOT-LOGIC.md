@@ -15,9 +15,13 @@ qualquer refatoração nos scripts de L1 ou nas chamadas de API de L2.
 | Bridged USDC.e (antigo) | 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174 | **DEPRECIADO — não usar** |
 | Native USDC (atual) | 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 | **ATIVO** |
 
-**Estado atual do código:** executor.js:46 e redeemer.js:8 ainda definem
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174". A migração para
-o Native USDC é uma tarefa prioritária.
+**Estado atual do código (atualizado 2026-04-28):**
+- `executor.js` define `USDC_ADDRESS = Native USDC` — usado apenas em `transferUsdc()`
+  (saques Monaco Rule). Correto se a wallet segura Native USDC.
+- `redeemer.js` define `USDC_ADDRESS = USDC.e` — revertido porque o SDK
+  `clob-client@5.x` ainda usa USDC.e como `collateral` on-chain. O parâmetro
+  `collateralToken` de `redeemPositions()` **deve casar** com o token usado na
+  criação da posição.
 
 ### 1.2 Roteadores de Allowance (Native USDC)
 
@@ -26,7 +30,11 @@ A Polymarket agora roteia allowances por múltiplos roteadores. Para evitar falh
 | Roteador | Endereço Completo | Função |
 |---|---|---|
 | Router 1 | 0xE111180000d2663C0091e4f400237545B87B996B | Primary Routing |
-| Router 2 | 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296 | Secondary Routing |
+| Router 2 / NegRisk Adapter | 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296 | Secondary Routing / NegRisk |
+
+O contrato de exchange da Polymarket (`0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`)
+é ainda referenciado como `verifyingContract` na assinatura EIP-712 de ordens pelo
+SDK `clob-client@5.x`. Ele valida assinaturas on-chain.
 
 > **Nota:** Jamais aprovar a antiga CTF Exchange (0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E) para Native USDC, pois ela não suporta o novo padrão de colateral.
 
@@ -42,19 +50,29 @@ Ao reescrever qualquer script que chame approve() no USDC:
 
 ---
 
-## 2. Scripts de L1 — Precisam Ser Criados/Refatorados
+## 2. Scripts de L1
 
-| Script | Função |
-|---|---|
-| scripts/approve_usdc.js | Aprovar os roteadores 0xE111... e 0xd91E... no contrato do Native USDC |
-| scripts/deposit_usdc.js | Depositar USDC nativo no CLOB (L2) |
-| scripts/redeem.js | Resgate de posições vencedoras via Conditional Tokens Framework |
+Os scripts de L1 foram criados em `scripts/`:
+
+| Script | Função | Estado |
+|---|---|---|
+| `scripts/approve_usdc.js` | Aprovar Router 1 e Router 2 no Native USDC | **Desbloquear** — preencher `ROUTERS` com os endereços acima |
+| `scripts/deposit_usdc.js` | Transferir USDC do EOA para Gnosis Safe (proxy) | Funcional |
+| `scripts/redeem.js` | Resgate manual de posições vencedoras via CTF | Funcional |
 
 ### Requisitos de Implementação
 
-1. **Proxy Wallet:** O bot opera via uma Proxy Wallet (0x8F7997DaE506b36c1F70bA518F8fD7bF33E1A267). Os scripts de L1 devem garantir que as ações sejam tomadas pela carteira Owner (0xBb0c...) em favor da Proxy.
-2. **Network Safety:** Injetar socks-proxy-agent no JsonRpcProvider (ver docs/AGENT-OPS.md).
-3. **RPC:** Utilizar RPCs resilientes: https://polygon-bor-rpc.publicnode.com ou https://1rpc.io/matic.
+1. **Proxy Wallet:** O bot opera via uma Proxy Wallet (0x8F7997DaE506b36c1F70bA518F8fD7bF33E1A267). Os scripts de L1 devem garantir que as ações sejam tomadas pela carteira Owner em favor da Proxy.
+2. **Network Safety:** Injetar `socks-proxy-agent` no `JsonRpcProvider` (ver `docs/AGENT-OPS.md`).
+3. **RPC:** Utilizar RPCs resilientes: `https://polygon-bor-rpc.publicnode.com` ou `https://1rpc.io/matic`.
+
+### Padrão dos scripts
+
+Todos os três scripts seguem o mesmo padrão:
+- `dotenv/config` para carregar `.env`
+- Ethers v6
+- `JsonRpcProvider` com `FetchRequest` + `SocksProxyAgent` (proxy-aware)
+- Suporte a Gnosis Safe via `execTransaction` + EIP-712
 
 ---
 
@@ -89,8 +107,12 @@ O bot atualmente consome 100% de CPU em instâncias de 1 core devido ao loop de 
 ## 5. Referência rápida de endereços
 
 ```
-Native USDC (Polygon):    0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359  ← USAR
-CTF Framework (redeem):   0x4D97DCd97eC945f40cF65F87097ACe5EA0476045  ← USAR (redeemer.js)
-CTF Exchange (trading):   0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E  ← MORTA
-USDC.e (bridged):         0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174  ← DEPRECIADO
+Native USDC (Polygon):    0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359  ← executor.js (transferUsdc)
+USDC.e (bridged):         0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174  ← redeemer.js (colateral CTF) + SDK
+CTF Framework (redeem):   0x4D97DCd97eC945f40cF65F87097ACe5EA0476045  ← redeemer.js (redeemPositions)
+CTF Exchange (signing):   0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E  ← SDK (verifyingContract EIP-712)
+NegRisk Exchange:         0xC5d563A36AE78145C45a50134d48A1215220f80a  ← SDK (negRisk markets)
+Router 1 (Primary):       0xE111180000d2663C0091e4f400237545B87B996B  ← approve para USDC
+Router 2 / NegRisk Adptr: 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296  ← approve para USDC
+Proxy Wallet:             0x8F7997DaE506b36c1F70bA518F8fD7bF33E1A267  ← Gnosis Safe do bot
 ```

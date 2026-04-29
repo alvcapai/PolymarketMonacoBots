@@ -5,10 +5,9 @@ import { Chain, ClobClient, OrderType, Side } from "@polymarket/clob-client";
 import { CONFIG } from "../config.js";
 
 // ─── Shim de compatibilidade ethers v5 → v6 ──────────────────────────────────
-// O SDK @polymarket/clob-client v2.8.0 foi escrito para ethers v5 e chama
-// signer._signTypedData() internamente. No ethers v6 esse método foi renomeado
-// para signTypedData (sem underscore), então o shim precisa existir na instância
-// de signer recebida pelo ClobClient.
+// O SDK @polymarket/clob-client v5.x aceita signers com interface ethers v5
+// (_signTypedData) ou viem (signTypedData). No ethers v6 o método é signTypedData
+// (sem underscore). O shim abaixo garante que o SDK encontra _signTypedData.
 function ensureLegacyTypedDataSigner(signer) {
   if (typeof signer?._signTypedData === "function") return signer;
   if (typeof signer?.signTypedData !== "function") return signer;
@@ -42,8 +41,8 @@ const WITHDRAWAL_ADDRESS = String(
   process.env.WITHDRAWAL_ADDRESS ?? "0xCbaDe218c50692C9401159A406c6Fd9A65dDF417"
 ).trim();
 
-// USDC on Polygon mainnet (confirmed via @polymarket/order-utils 1.3.1)
-const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+// Native USDC on Polygon mainnet (migrado de Bridged USDC.e — ver docs/BOT-LOGIC.md)
+const USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
 
 // ─── ABIs ────────────────────────────────────────────────────────────────────
 

@@ -5,6 +5,9 @@ const RPC_URL = process.env.POLYGON_RPC_URL || "https://polygon-bor-rpc.publicno
 const TRADE_MOCK = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
 
 const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+// Bridged USDC.e — colateral usado pelo SDK Polymarket (clob-client) ao criar posições.
+// redeemPositions() exige o mesmo collateralToken usado na criação da posição.
+// Se a Polymarket migrar o colateral on-chain para Native USDC, atualizar aqui.
 const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const DATA_API = "https://data-api.polymarket.com";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
