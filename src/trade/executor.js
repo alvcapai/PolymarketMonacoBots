@@ -106,6 +106,26 @@ function formatCents(price) {
   return `${(Number(price) * 100).toFixed(1).replace(/\.0$/, "")}c`;
 }
 
+// ─── Balance-allowance sync (the "Activate Funds" step) ─────────────────────
+
+/**
+ * Calls POST /balance-allowance/update on the CLOB so the exchange recognises
+ * the on-chain USDC allowance.  This is the programmatic equivalent of the
+ * "Activate Funds" button shown in the Polymarket UI after a deposit/approve.
+ * Safe to call repeatedly — it's a no-op when already synced.
+ */
+async function ensureBalanceAllowance() {
+  if (!clobClient) return;
+  try {
+    await clobClient.updateBalanceAllowance({ asset_type: "COLLATERAL" });
+  } catch (err) {
+    // Non-fatal: the order may still succeed if already activated
+    process.stderr.write(
+      `${ANSI.yellow}[executor] updateBalanceAllowance falhou (não-fatal): ${err?.message}${ANSI.reset}\n`
+    );
+  }
+}
+
 // ─── Initialization ───────────────────────────────────────────────────────────
 
 let clobClient    = null;
@@ -354,6 +374,9 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
     ` (Probabilidade: ${probabilityN.toFixed(2)}%)${ANSI.reset}\n`
   );
 
+  // Sync on-chain allowance with CLOB ("Activate Funds")
+  await ensureBalanceAllowance();
+
   // CLOB V2: createAndPostOrder creates, signs, and posts in one call
   let response;
   try {
@@ -436,6 +459,9 @@ export async function executeSell(tokenId, shareSize, limitPrice) {
     `${ANSI.green}[EXECUCAO] Vendendo ${roundedSize} shares do Token ${token.slice(0, 20)}... ` +
     `a ${formatCents(roundedPrice)}${ANSI.reset}\n`
   );
+
+  // Sync on-chain allowance with CLOB ("Activate Funds")
+  await ensureBalanceAllowance();
 
   let response;
   try {
