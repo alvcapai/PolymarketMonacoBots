@@ -1,18 +1,7 @@
 import "dotenv/config";
 import { CONFIG } from "./config.js";
-import { fetchKlines, fetchLastPrice } from "./data/binance.js";
-import { fetchChainlinkBtcUsd } from "./data/chainlink.js";
 import { startChainlinkPriceStream } from "./data/chainlinkWs.js";
 import { startPolymarketChainlinkPriceStream } from "./data/polymarketLiveWs.js";
-import {
-  fetchMarketBySlug,
-  fetchLiveEventsBySeriesId,
-  flattenEventMarkets,
-  pickLatestLiveMarket,
-  fetchClobPrice,
-  fetchOrderBook,
-  summarizeOrderBook
-} from "./data/polymarket.js";
 import { computeVwapSeries } from "./indicators/vwap.js";
 import { computeRsi, slopeLast } from "./indicators/rsi.js";
 import { computeMacd } from "./indicators/macd.js";
@@ -35,7 +24,6 @@ import {
 import { saveBankrollState, loadBankrollState } from "./engines/bankroll-persist.js";
 import { appendCsvRow, formatNumber, formatPct, getCandleWindowTiming, sleep } from "./utils.js";
 import { startBinanceTradeStream } from "./data/binanceWs.js";
-import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
 import { logger } from "./logging/logger.js";
 import { executeTrade, fetchUsdcBalance, transferUsdc, WITHDRAWAL_ADDRESS } from "./trade/executor.js";
@@ -50,29 +38,37 @@ import {
 } from "./engines/trade-telemetry.js";
 import { logCounterfactual } from "./logging/counterfactual-log.js";
 
+// Import modules refactored for resilience
+import { aggregateMarketData } from "./data/market-aggregator.js";
+import {
+  ANSI,
+  LABEL_W,
+  fmtTimeLeft,
+  stripAnsi,
+  screenWidth,
+  sepLine,
+  padLabel,
+  centerText,
+  kv,
+  renderScreen,
+  formatProbPct,
+  fmtEtTime,
+  getBtcSession,
+  colorPriceLine,
+  toDecisionSignal
+} from "./ui/screen.js";
+
 applyGlobalProxyFromEnv();
 
 const tradedTokens = new Set();
 const tradedMarketSlugs = new Set();
 let isPlacingOrder = false;
 
-// Rolling 30-candle history of (binanceClose − chainlinkPrice) for basis monitoring.
+// Basis tracking
 const basisHistory = [];
-
-const ANSI = {
-  reset: "\x1b[0m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  gray: "\x1b[90m",
-  white: "\x1b[97m",
-  dim: "\x1b[2m"
-};
-
 const BALANCE_TTL_MS = 30_000;
 const REDEEM_INTERVAL_MS = 2 * 60 * 1000;
 const TAKE_PROFIT_INTERVAL_MS = 10 * 1000;
-const LABEL_W = 18;
 const MODEL_VERSION = "v1-edge-calibrated";
 
 function marketTypeFromTimeframe(timeframe) {
@@ -93,220 +89,11 @@ function countVwapCrosses(closes, vwapSeries, lookback) {
   return crosses;
 }
 
-function fmtTimeLeft(mins) {
-  const totalSeconds = Math.max(0, Math.floor(mins * 60));
-  const m = Math.floor(totalSeconds / 60);
-  const s = totalSeconds % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-function stripAnsi(s) {
-  return String(s).replace(/\x1b\[[0-9;]*m/g, "");
-}
-
-function screenWidth() {
-  const w = Number(process.stdout?.columns);
-  return Number.isFinite(w) && w >= 40 ? w : 80;
-}
-
-function sepLine(ch = "-") {
-  return `${ANSI.white}${ch.repeat(screenWidth())}${ANSI.reset}`;
-}
-
-function padLabel(label, width) {
-  const visible = stripAnsi(label).length;
-  if (visible >= width) return label;
-  return label + " ".repeat(width - visible);
-}
-
-function centerText(text, width) {
-  const visible = stripAnsi(text).length;
-  if (visible >= width) return text;
-  const left = Math.floor((width - visible) / 2);
-  const right = width - visible - left;
-  return " ".repeat(left) + text + " ".repeat(right);
-}
-
-function kv(label, value) {
-  return `${padLabel(String(label), LABEL_W)}${value}`;
-}
-
-function renderScreen(text) {
-  try {
-    readline.cursorTo(process.stdout, 0, 0);
-    readline.clearScreenDown(process.stdout);
-  } catch {
-    // ignore
-  }
-  process.stdout.write(text);
-}
-
-function formatProbPct(p, digits = 1) {
-  if (p === null || p === undefined || !Number.isFinite(Number(p))) return "-";
-  return `${(Number(p) * 100).toFixed(digits)}%`;
-}
-
-function fmtEtTime(now = new Date()) {
-  try {
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false
-    }).format(now);
-  } catch {
-    return "-";
-  }
-}
-
-function getBtcSession(now = new Date()) {
-  const h = now.getUTCHours();
-  const inAsia = h >= 0 && h < 8;
-  const inEurope = h >= 7 && h < 16;
-  const inUs = h >= 13 && h < 22;
-
-  if (inEurope && inUs) return "Europe/US overlap";
-  if (inAsia && inEurope) return "Asia/Europe overlap";
-  if (inAsia) return "Asia";
-  if (inEurope) return "Europe";
-  if (inUs) return "US";
-  return "Off-hours";
-}
-
-function colorPriceLine({ label, price, prevPrice, decimals = 0, prefix = "" }) {
-  if (price === null || price === undefined) {
-    return `${label}: ${ANSI.gray}-${ANSI.reset}`;
-  }
-
-  const p = Number(price);
-  const prev = prevPrice === null || prevPrice === undefined ? null : Number(prevPrice);
-  let color = ANSI.reset;
-  let marker = "";
-  if (prev !== null && Number.isFinite(prev) && Number.isFinite(p) && p !== prev) {
-    color = p > prev ? ANSI.green : ANSI.red;
-    marker = p > prev ? " UP" : " DOWN";
-  }
-  return `${label}: ${color}${prefix}${formatNumber(p, decimals)}${marker}${ANSI.reset}`;
-}
-
-function toDecisionSignal(decision) {
-  if (!decision?.canEnter) return "NO TRADE";
-  return decision.side === "UP" ? "BUY UP" : "BUY DOWN";
-}
-
-const marketCache = {
-  market: null,
-  fetchedAtMs: 0
-};
-
-async function resolveCurrentMarket() {
-  if (CONFIG.polymarket.marketSlug) {
-    return await fetchMarketBySlug(CONFIG.polymarket.marketSlug);
-  }
-
-  if (!CONFIG.polymarket.autoSelectLatest) return null;
-
-  const now = Date.now();
-  if (marketCache.market && now - marketCache.fetchedAtMs < CONFIG.pollIntervalMs) {
-    return marketCache.market;
-  }
-
-  const events = await fetchLiveEventsBySeriesId({ seriesId: CONFIG.polymarket.seriesId, limit: 25 });
-  const markets = flattenEventMarkets(events);
-  const picked = pickLatestLiveMarket(markets);
-  marketCache.market = picked;
-  marketCache.fetchedAtMs = now;
-  return picked;
-}
-
-async function fetchPolymarketSnapshot() {
-  const market = await resolveCurrentMarket();
-  if (!market) return { ok: false, reason: "market_not_found" };
-
-  const outcomes = Array.isArray(market.outcomes)
-    ? market.outcomes
-    : (typeof market.outcomes === "string" ? JSON.parse(market.outcomes) : []);
-  const outcomePrices = Array.isArray(market.outcomePrices)
-    ? market.outcomePrices
-    : (typeof market.outcomePrices === "string" ? JSON.parse(market.outcomePrices) : []);
-  const clobTokenIds = Array.isArray(market.clobTokenIds)
-    ? market.clobTokenIds
-    : (typeof market.clobTokenIds === "string" ? JSON.parse(market.clobTokenIds) : []);
-
-  let upTokenId = null;
-  let downTokenId = null;
-  for (let i = 0; i < outcomes.length; i += 1) {
-    const label = String(outcomes[i]).toLowerCase();
-    const tokenId = clobTokenIds[i] ? String(clobTokenIds[i]) : null;
-    if (!tokenId) continue;
-    if (label === CONFIG.polymarket.upOutcomeLabel.toLowerCase()) upTokenId = tokenId;
-    if (label === CONFIG.polymarket.downOutcomeLabel.toLowerCase()) downTokenId = tokenId;
-  }
-
-  const upIndex = outcomes.findIndex((x) => String(x).toLowerCase() === CONFIG.polymarket.upOutcomeLabel.toLowerCase());
-  const downIndex = outcomes.findIndex((x) => String(x).toLowerCase() === CONFIG.polymarket.downOutcomeLabel.toLowerCase());
-  const gammaUp = upIndex >= 0 ? Number(outcomePrices[upIndex]) : null;
-  const gammaDown = downIndex >= 0 ? Number(outcomePrices[downIndex]) : null;
-
-  if (!upTokenId || !downTokenId) {
-    return { ok: false, reason: "missing_token_ids", market };
-  }
-
-  let upBuy = null;
-  let downBuy = null;
-  let upBookSummary = { bestBid: null, bestAsk: null, spread: null, bidLiquidity: null, askLiquidity: null };
-  let downBookSummary = { bestBid: null, bestAsk: null, spread: null, bidLiquidity: null, askLiquidity: null };
-
-  try {
-    const [yesBuy, noBuy, upBook, downBook] = await Promise.all([
-      fetchClobPrice({ tokenId: upTokenId, side: "buy" }),
-      fetchClobPrice({ tokenId: downTokenId, side: "buy" }),
-      fetchOrderBook({ tokenId: upTokenId }),
-      fetchOrderBook({ tokenId: downTokenId })
-    ]);
-    upBuy = yesBuy;
-    downBuy = noBuy;
-    upBookSummary = summarizeOrderBook(upBook);
-    downBookSummary = summarizeOrderBook(downBook);
-  } catch {
-    upBookSummary = {
-      bestBid: Number(market.bestBid) || null,
-      bestAsk: Number(market.bestAsk) || null,
-      spread: Number(market.spread) || null,
-      bidLiquidity: null,
-      askLiquidity: null
-    };
-    downBookSummary = {
-      bestBid: null,
-      bestAsk: null,
-      spread: Number(market.spread) || null,
-      bidLiquidity: null,
-      askLiquidity: null
-    };
-  }
-
-  return {
-    ok: true,
-    market,
-    tokens: { upTokenId, downTokenId },
-    prices: {
-      up: upBuy ?? gammaUp,
-      down: downBuy ?? gammaDown
-    },
-    orderbook: {
-      up: upBookSummary,
-      down: downBookSummary
-    }
-  };
-}
-
 function processOutcomeEvents(bankrollState, events) {
   for (const event of events) {
     const outcome = recordOutcomeByToken(bankrollState, event.tokenId, event.won);
     if (!outcome.updated) continue;
 
-    // Unlock token and market slug so the bot can trade new markets freely
     tradedTokens.delete(event.tokenId);
     const closedSlug = outcome.position?.marketSlug;
     if (closedSlug) tradedMarketSlugs.delete(closedSlug);
@@ -344,6 +131,23 @@ function processOutcomeEvents(bankrollState, events) {
   }
 }
 
+let globalBankrollState = null;
+let isShuttingDown = false;
+
+function handleShutdown() {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  logger.info("Graceful shutdown initiated, saving bankroll state safely...");
+  if (globalBankrollState) {
+    saveBankrollState(globalBankrollState, CONFIG.bankrollStatePath);
+    logger.info("Bankroll state persisted cleanly.");
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", handleShutdown);
+process.on("SIGTERM", handleShutdown);
+
 async function main() {
   const binanceStream = startBinanceTradeStream({ symbol: CONFIG.symbol });
   const polymarketLiveStream = startPolymarketChainlinkPriceStream({
@@ -354,6 +158,7 @@ async function main() {
   });
 
   const bankrollState = loadBankrollState(CONFIG.bankrollStatePath, 20);
+  globalBankrollState = bankrollState;
 
   let cachedBalance = null;
   let lastBalanceCheckMs = 0;
@@ -365,6 +170,7 @@ async function main() {
   let wasCycleEnded = false;
   let lastPersistMs = 0;
   const PERSIST_INTERVAL_MS = 60_000;
+  
   function persistIfDue() {
     const now = Date.now();
     if (now - lastPersistMs >= PERSIST_INTERVAL_MS) {
@@ -406,7 +212,7 @@ async function main() {
     "stake_usd"
   ];
 
-  while (true) {
+  while (!isShuttingDown) {
     const timing = getCandleWindowTiming(CONFIG.candleWindowMinutes);
 
     try {
@@ -456,18 +262,9 @@ async function main() {
       const chainlinkWsTick = chainlinkStream.getLast();
       const chainlinkWsPrice = chainlinkWsTick?.price ?? null;
 
-      const chainlinkPromise = polymarketWsPrice !== null
-        ? Promise.resolve({ price: polymarketWsPrice, updatedAt: polymarketWsTick?.updatedAt ?? null, source: "polymarket_ws" })
-        : chainlinkWsPrice !== null
-          ? Promise.resolve({ price: chainlinkWsPrice, updatedAt: chainlinkWsTick?.updatedAt ?? null, source: "chainlink_ws" })
-          : fetchChainlinkBtcUsd();
-
-      const [klines1m, lastPrice, chainlink, poly] = await Promise.all([
-        fetchKlines({ interval: "1m", limit: 240 }),
-        fetchLastPrice(),
-        chainlinkPromise,
-        fetchPolymarketSnapshot()
-      ]);
+      const { klines1m, lastPrice, chainlink, poly } = await aggregateMarketData(
+        CONFIG, polymarketWsPrice, polymarketWsTick, chainlinkWsPrice, chainlinkWsTick
+      );
 
       const settlementMs = poly.ok && poly.market?.endDate ? new Date(poly.market.endDate).getTime() : null;
       const settlementLeftMin = settlementMs ? (settlementMs - Date.now()) / 60_000 : null;
@@ -479,6 +276,12 @@ async function main() {
         processOutcomeEvents(bankrollState, Array.isArray(tpReport?.events) ? tpReport.events : []);
       }
 
+      // If klines are empty due to API failure, skip this tick gracefully
+      if (!klines1m || klines1m.length === 0) {
+        await sleep(CONFIG.pollIntervalMs);
+        continue;
+      }
+
       const closes = klines1m.map((c) => c.close);
       const vwapSeries = computeVwapSeries(klines1m);
       const vwapNow = vwapSeries[vwapSeries.length - 1];
@@ -486,7 +289,7 @@ async function main() {
       const vwapSlope = vwapSeries.length >= vwapLookback
         ? (vwapNow - vwapSeries[vwapSeries.length - vwapLookback]) / vwapLookback
         : null;
-      const vwapDist = vwapNow ? (lastPrice - vwapNow) / vwapNow : null;
+      const vwapDist = vwapNow && lastPrice ? (lastPrice - vwapNow) / vwapNow : null;
 
       const rsiNow = computeRsi(closes, CONFIG.rsiPeriod);
       const rsiSeries = [];
@@ -507,8 +310,6 @@ async function main() {
         ? closes[closes.length - 1] < vwapNow && closes[closes.length - 2] > vwapSeries[vwapSeries.length - 2]
         : false;
 
-      // Basis tracking: Chainlink is the settlement source, Binance is the history source.
-      // Log the spread each cycle; widen VWAP margin when basis is noisy (stddev > $25).
       const chainlinkPrice = chainlink?.price ?? null;
       const binanceClose = closes[closes.length - 1];
       const basisNow = chainlinkPrice !== null ? binanceClose - chainlinkPrice : null;
@@ -523,10 +324,9 @@ async function main() {
         basisStddev = Math.sqrt(variance);
       }
       const vwapMargin = basisStddev > 25 ? 0.5 * basisStddev : 0;
-      logger.info({ component: "basis", binance: binanceClose, chainlink: chainlinkPrice, basis: basisNow, stddev: basisStddev, vwapMargin }, "Basis check");
-
+      
       const scored = scoreDirection({
-        price: chainlinkPrice ?? lastPrice, // Chainlink as primary anchor; fallback to Binance
+        price: chainlinkPrice ?? lastPrice,
         vwap: vwapNow,
         vwapMargin,
         vwapSlope,
@@ -567,15 +367,7 @@ async function main() {
       });
 
       const signal = toDecisionSignal(decision);
-      logger.info({
-        component: "risk", bankroll: bankrollState.bankroll, cycle: bankrollState.cycleNumber,
-        openPositions: bankrollState.openPositions, exposure: bankrollState.totalExposure,
-        losingStreak: bankrollState.losingStreak, side: decision.side,
-        probModel: decision.probModel, probMarket: decision.probMarket,
-        rawEdge: decision.rawEdge, netEdge: decision.edge, stake: decision.stake,
-        canEnter: decision.canEnter, reason: decision.reason,
-      }, "Risk diagnostics");
-
+      
       logCounterfactual({
         logDir: "./logs",
         marketSlug,
@@ -649,7 +441,6 @@ async function main() {
 
       const canTradeThisMarket = poly.ok && marketSlug && !tradedMarketSlugs.has(marketSlug);
       if (!decision.canEnter) {
-        logger.info({ component: "auto-trade", action: "NO_TRADE", reason: decision.reason, signal }, "No trade");
         const blockReport = recordBlockReason(decision.reason);
         if (blockReport) {
           logger.info({ component: "telemetry" }, blockReport);
@@ -700,10 +491,6 @@ async function main() {
           tradedTokens.add(targetTokenId);
           isPlacingOrder = true;
           try {
-            // Ensure shareSize >= MIN_SHARES (5) at the actual fill price.
-            // risk-management computes minViableStake using probMarket, but
-            // targetPrice = rawAsk + slippage is always higher, so the computed
-            // shares can fall below 5 — causing the CLOB to silently reject the fill.
             const minStake = Math.ceil(5 * targetPrice * 100) / 100;
             const effectiveStake = Math.max(decision.stake, minStake);
 
@@ -770,7 +557,7 @@ async function main() {
       logger.error({ component: "loop", err: err?.stack ?? err?.message ?? String(err) }, "Main loop error");
     }
 
-    await sleep(CONFIG.pollIntervalMs);
+    if (!isShuttingDown) await sleep(CONFIG.pollIntervalMs);
   }
 }
 
