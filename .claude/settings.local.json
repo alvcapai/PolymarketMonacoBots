@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//root/.pm2/logs/**)",
+      "Bash(git *)",
+      "Bash(pm2 show *)",
+      "Bash(grep -n \"cachedBalance\\\\|refreshBalance\\\\|USDC\\\\|\\\\$.*balance\\\\|balance.*\\\\$\" /home/ubuntu/.openclaw/workspace/projects/PolymarketBTC15mAssistant/src/index.js)",
+      "Bash(grep -n \"currentBalance\\\\|balance\\\\|USDC\\\\|\\\\$\" /home/ubuntu/.openclaw/workspace/projects/PolymarketBTC15mAssistant/src/index.js)",
+      "Bash(grep -n \"currentBalance\\\\|balance\\\\|\\\\$\" /home/ubuntu/.openclaw/workspace/projects/PolymarketBTC15mAssistant/src/index.js)",
+      "Bash(grep -i \"usd\\\\|\\\\$\\\\|display\\\\|format\\\\|render\\\\|row\\\\|line\\\\|tui\")",
+      "Bash(node --input-type=module --check)",
+      "Bash(node smoketest.js)",
+      "Bash(node -e ' *)",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(node *)",
+      "Bash(grep -v \"^$\")",
+      "Bash(pm2 list *)",
+      "Bash(npx pm2 *)",
+      "Bash(echo \"Started PID: $!\")",
+      "Bash(ps -p 29038 -o pid,etime,stat,cmd --no-headers)",
+      "Bash(kill 29041)"
+    ]
+  }
+}

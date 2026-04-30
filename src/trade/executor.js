@@ -116,13 +116,18 @@ async function ensureBalanceAllowance() {
 
 // ─── Initialization ───────────────────────────────────────────────────────────
 
-let clobClient    = null;
-let signerWallet  = null;   // ethers wallet (for on-chain txs: USDC transfer, Safe)
-let viemAccount   = null;   // viem account (for CLOB V2 signing)
-let walletAddress = null;
-let apiSecret     = null;
-let apiKey        = null;
-let apiPassphrase = null;
+let clobClient      = null;
+let signerWallet    = null;   // ethers wallet (for on-chain txs: USDC transfer, Safe)
+let viemAccount     = null;   // viem account (for CLOB V2 signing)
+let viemSignerRef   = null;   // kept for ClobClient re-init after proxy discovery
+let credsRef        = null;   // kept for ClobClient re-init after proxy discovery
+let walletAddress   = null;
+let apiSecret       = null;
+let apiKey          = null;
+let apiPassphrase   = null;
+// effectiveProxy/SignatureType may be updated by auto-discovery below
+let effectiveProxy  = PROXY_ADDRESS;
+let effectiveSigType = SIGNATURE_TYPE;
 
 if (!TRADE_MOCK) {
   const pk = process.env.PK;
@@ -161,12 +166,13 @@ if (!TRADE_MOCK) {
 
   signerWallet   = wallet;
   viemAccount    = account;
+  viemSignerRef  = viemSigner;
+  credsRef       = creds;
   walletAddress  = wallet.address;
   apiSecret      = creds.secret;
   apiKey         = creds.key;
   apiPassphrase  = creds.passphrase;
 
-  // ── ClobClient V2 with options-object constructor ───────────────────────
   clobClient = new ClobClient({
     host:          CLOB_HOST,
     chain:         CHAIN_ID,
@@ -179,6 +185,43 @@ if (!TRADE_MOCK) {
   logger.info({ component: "executor", signatureType: SIGNATURE_TYPE, funder: PROXY_ADDRESS || undefined }, "ClobClient V2 initialized (real mode)");
 } else {
   logger.info({ component: "executor", mock: true }, "TRADE_MOCK_MODE active — no real orders will be sent");
+}
+
+// ─── Auto-discover Gnosis Safe proxy if POLYMARKET_PROXY_ADDRESS is not set ──
+// Uses the Gnosis Safe Transaction Service to find Safes owned by this EOA.
+// Re-initialises ClobClient with sig_type=2 so orders and balance use the Safe.
+if (!TRADE_MOCK && !PROXY_ADDRESS && walletAddress) {
+  try {
+    const safeRes = await fetch(
+      `https://safe-transaction-polygon.safe.global/api/v1/owners/${walletAddress}/safes/`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (safeRes.ok) {
+      const safeBody = await safeRes.json();
+      const discovered = Array.isArray(safeBody.safes) && safeBody.safes.length > 0
+        ? safeBody.safes[0]
+        : null;
+      if (discovered) {
+        effectiveProxy   = discovered;
+        effectiveSigType = 2;
+        clobClient = new ClobClient({
+          host:          CLOB_HOST,
+          chain:         CHAIN_ID,
+          signer:        viemSignerRef,
+          creds:         credsRef,
+          signatureType: 2,
+          funderAddress: discovered,
+        });
+        logger.info(
+          { component: "executor", proxy: discovered },
+          "Gnosis Safe auto-discovered — ClobClient re-initialised with sig_type=2. " +
+          "Add POLYMARKET_PROXY_ADDRESS=" + discovered + " and POLYMARKET_SIGNATURE_TYPE=2 to .env to skip this step on restart."
+        );
+      }
+    }
+  } catch (err) {
+    logger.warn({ component: "executor", err: err?.message }, "Gnosis Safe auto-discovery failed — using EOA mode");
+  }
 }
 
 // ─── HMAC helper (para consulta de saldo via API raw) ─────────────────────────
@@ -205,7 +248,7 @@ export async function fetchUsdcBalance() {
     const path = "/balance-allowance";
     const ts   = Math.floor(Date.now() / 1000).toString();
     const sig  = buildHmacSignature(apiSecret, ts, "GET", path);
-    const query = `asset_type=COLLATERAL&signature_type=${SIGNATURE_TYPE}${PROXY_ADDRESS ? `&funder=${PROXY_ADDRESS}` : ""}`;
+    const query = `asset_type=COLLATERAL&signature_type=${effectiveSigType}${effectiveProxy ? `&funder=${effectiveProxy}` : ""}`;
 
     const res = await fetch(`${CLOB_HOST}${path}?${query}`, {
       method: "GET",
@@ -219,11 +262,24 @@ export async function fetchUsdcBalance() {
       },
     });
 
-    if (!res.ok) return null;
     const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      logger.warn({ component: "executor", status: res.status, body }, "fetchUsdcBalance API error");
+      return null;
+    }
     const raw  = Number(body.balance ?? 0);
-    return Number.isFinite(raw) ? raw / 1_000_000 : null;
-  } catch {
+    if (!Number.isFinite(raw) || raw <= 0) {
+      if (!effectiveProxy) {
+        logger.warn(
+          { component: "executor" },
+          "USDC balance returned $0.00 — if using Gnosis Safe, set POLYMARKET_PROXY_ADDRESS and POLYMARKET_SIGNATURE_TYPE=2 in .env"
+        );
+      }
+      return null;
+    }
+    return raw / 1_000_000;
+  } catch (err) {
+    logger.warn({ component: "executor", err: err?.message }, "fetchUsdcBalance network error");
     return null;
   }
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
-LOG_FILE="/root/workspace/PolymarketBTC15mAssistant/logs/btc15m-err.log"
-LAST_CHECK="/root/workspace/PolymarketBTC15mAssistant/.last_check.txt"
+LOG_FILE="/home/ubuntu/.openclaw/workspace/projects/PolymarketBTC15mAssistant/logs/btc15m-err.log"
+LAST_CHECK="/home/ubuntu/.openclaw/workspace/projects/PolymarketBTC15mAssistant/.last_check.txt"
 
 # Pega o número da última linha processada
 last_line=$(cat $LAST_CHECK 2>/dev/null || echo 0)
@@ -15,7 +15,7 @@ fi
 new_errors=$(tail -n +$((last_line + 1)) "$LOG_FILE" | grep -E "FALHA|order_version_mismatch")
 
 if [ -n "$new_errors" ]; then
-    echo "$(date): $new_errors" >> /root/workspace/PolymarketBTC15mAssistant/alertas_bot.log
+    echo "$(date): $new_errors" >> /home/ubuntu/.openclaw/workspace/projects/PolymarketBTC15mAssistant/alertas_bot.log
 fi
 
 echo "$current_line" > "$LAST_CHECK"

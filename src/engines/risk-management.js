@@ -50,7 +50,7 @@ export function createBankrollState(initialBankroll = 20) {
 }
 
 export function syncBankroll(state, realBalance) {
-  if (Number.isFinite(realBalance) && realBalance >= 0) {
+  if (Number.isFinite(realBalance) && realBalance > 0) {
     state.bankroll = realBalance;
   }
 }
