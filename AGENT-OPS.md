@@ -245,27 +245,22 @@ grep \$(date +%Y-%m-%d) /home/claudio/workspace/PolymarketBTC15mAssistant/logs/e
 
 ### 10.1 — Criar o `.env`
 
-```env
-# OBRIGATORIO — chave privada da carteira MetaMask (com ou sem 0x)
-# Esta e a PK do EOA (signer/owner), NAO da proxy wallet.
-PK=sua_chave_privada_metamask_aqui
-
-# OBRIGATORIO — endereco da proxy wallet (Gnosis Safe) criada pela Polymarket.
-# Este e o endereco que aparece na UI da Polymarket (Settings ou Deposit),
-# e e diferente do endereco da sua MetaMask.
-# Como encontrar: acesse polymarket.com → Settings → copie o endereco da carteira.
-# Ou no servidor: grep POLYMARKET_PROXY_ADDRESS .env
-POLYMARKET_PROXY_ADDRESS=0xSeuProxyAddress
-
-# OBRIGATORIO quando proxy esta configurado — tipo de assinatura (2 = Gnosis Safe)
-POLYMARKET_SIGNATURE_TYPE=2
-
-# Opcional — RPC customizado (padrao: https://polygon-bor-rpc.publicnode.com)
-POLYGON_RPC_URL=https://polygon-bor-rpc.publicnode.com
-
-# Opcional — endpoint CLOB (padrao: https://clob.polymarket.com)
-POLYMARKET_CLOB_HOST=https://clob.polymarket.com
+```bash
+cp .env.example .env
 ```
+
+Preencha as variaveis obrigatorias no `.env` (veja `.env.example` para a lista completa com descricoes):
+
+| Variavel | Obrigatorio | Descricao |
+|---|---|---|
+| `PK` | Sim | Chave privada da MetaMask (EOA/signer). MetaMask → Account details → Show private key |
+| `POLYMARKET_PROXY_ADDRESS` | Sim | Endereco da proxy wallet (Gnosis Safe). polymarket.com → Settings → endereco da carteira |
+| `POLYMARKET_SIGNATURE_TYPE` | Sim | Usar `2` (Gnosis Safe) |
+| `POLYMARKET_API_KEY` | Auto | Gerada por `node keygen.js` |
+| `POLYMARKET_API_SECRET` | Auto | Gerada por `node keygen.js` |
+| `POLYMARKET_API_PASSPHRASE` | Auto | Gerada por `node keygen.js` |
+| `TRADE_MOCK_MODE` | Nao | `true` (padrao/seguro) ou `false` (dinheiro real) |
+| `TIMEFRAME` | Nao | `btc-15m`, `btc-5m`, `eth-15m`, `eth-5m` |
 
 > **IMPORTANTE — PK vs Proxy Address:**
 > A Polymarket cria uma **Gnosis Safe (proxy wallet)** para cada conta. Os fundos ficam nessa proxy, nao na MetaMask diretamente. A `PK` e a chave privada da MetaMask (o EOA que e owner da Safe), e o `POLYMARKET_PROXY_ADDRESS` e o endereco da Safe. Sao enderecos diferentes. Sem o proxy address configurado, o saldo aparece como `$0.00` mesmo com fundos depositados.
