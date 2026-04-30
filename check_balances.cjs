@@ -1,5 +1,5 @@
 const { ethers } = require('ethers');
-const provider = new ethers.JsonRpcProvider('https://polygon.llamarpc.com');
+const provider = new ethers.JsonRpcProvider('https://polygon-bor-rpc.publicnode.com');
 const USDC_ADDR = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 const USDC_ABI = ['function balanceOf(address) view returns (uint256)'];
 const usdcContract = new ethers.Contract(USDC_ADDR, USDC_ABI, provider);

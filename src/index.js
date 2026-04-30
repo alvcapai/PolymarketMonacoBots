@@ -39,7 +39,7 @@ import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
 import { logger } from "./logging/logger.js";
 import { executeTrade, fetchUsdcBalance, transferUsdc, WITHDRAWAL_ADDRESS } from "./trade/executor.js";
-import { runAutoRedeem } from "./trade/redeemer.js";
+import { runAutoRedeem, reconcileStalePositions } from "./trade/redeemer.js";
 import { checkTakeProfit } from "./trade/take-profit.js";
 import {
   createTradeId,
@@ -415,7 +415,9 @@ async function main() {
         lastRedeemCheckMs = nowMs;
         const report = await runAutoRedeem();
         processOutcomeEvents(bankrollState, Array.isArray(report?.events) ? report.events : []);
-        if ((report?.events?.length ?? 0) > 0) persistNow();
+        const staleReport = await reconcileStalePositions(bankrollState);
+        processOutcomeEvents(bankrollState, Array.isArray(staleReport?.events) ? staleReport.events : []);
+        if ((report?.events?.length ?? 0) + (staleReport?.events?.length ?? 0) > 0) persistNow();
       }
 
       const currentBalance = await refreshBalance();

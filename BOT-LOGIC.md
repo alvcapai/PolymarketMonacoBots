@@ -294,11 +294,19 @@ In the last 2 minutes, the bot holds — a winning position will settle at $1.00
 
 ### Settlement / redeem (checked every 2 min)
 
-`runAutoRedeem` queries `data-api.polymarket.com/positions` for the wallet. If a position's `curPrice` is exactly `0` or `1`, it is settled:
+**`runAutoRedeem`** queries `data-api.polymarket.com/positions` for the wallet. If a position's `curPrice` is exactly `0` or `1`, it is settled:
 - `curPrice = 1` → WIN → triggers `redeemPositions` on the Conditional Token Framework contract
 - `curPrice = 0` → LOSS → recorded, no redeem needed
 
 For Gnosis Safe wallets (`SIGNATURE_TYPE = 2`): redemption is executed via `execTransaction` on the Safe contract, signed EIP-712. This is the source of the `already known` / `GS026` / `gapped-nonce` redeem errors — these are on-chain transaction management issues and do not affect new bets.
+
+**`reconcileStalePositions`** runs alongside `runAutoRedeem` every 2 min and handles a second failure mode: *ghost positions* from GTC orders that were accepted by the CLOB but never filled. Because the user holds no actual shares on-chain, those positions never appear in `data-api.polymarket.com/positions` and `runAutoRedeem` cannot detect them. Without this reconciliation they would block future trades indefinitely (`max_positions_1_reached`).
+
+For each position in `bankrollState` older than 25 minutes it determines the outcome in two steps:
+1. **CLOB midpoint** (`clob.polymarket.com/midpoint?token_id=…`) — returns 0 or 1 for resolved tokens.
+2. **Gamma API fallback** (`gamma-api.polymarket.com/markets?slug=…&closed=true`) — parses `clobTokenIds` + `outcomePrices` (JSON strings) to find the winning token.
+
+If neither resolves the outcome the position is left untouched until the next cycle.
 
 ### Outcome recording
 

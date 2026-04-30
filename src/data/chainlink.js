@@ -22,7 +22,7 @@ function getRpcCandidates() {
   const defaults = [
     "https://polygon-rpc.com",
     "https://rpc.ankr.com/polygon",
-    "https://polygon.llamarpc.com"
+    "https://polygon-bor-rpc.publicnode.com"
   ];
 
   const all = [...fromList, ...single, ...defaults].map((s) => String(s).trim()).filter(Boolean);

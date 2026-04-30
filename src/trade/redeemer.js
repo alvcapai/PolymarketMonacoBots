@@ -11,7 +11,13 @@ const CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 // Se a Polymarket migrar o colateral on-chain para Native USDC, atualizar aqui.
 const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const DATA_API = "https://data-api.polymarket.com";
+const CLOB_HOST = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
+const GAMMA_API = "https://gamma-api.polymarket.com";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+// Positions in bankrollState older than this threshold are reconciled against the
+// API on each redeem cycle. Covers the 15-min window plus a buffer for settlement lag.
+const STALE_POSITION_MS = 25 * 60 * 1000;
 
 const CTF_ABI = [
   "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets) external",
@@ -146,6 +152,100 @@ async function redeemViaSafe(wallet, conditionId, indexSets) {
     safeTx.safeTxGas, safeTx.baseGas, safeTx.gasPrice,
     safeTx.gasToken, safeTx.refundReceiver, signature
   );
+}
+
+async function fetchMidPrice(tokenId) {
+  try {
+    const res = await fetch(`${CLOB_HOST}/midpoint?token_id=${tokenId}`, {
+      headers: { Accept: "application/json" }
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    const mid = Number(body?.mid ?? body?.midpoint ?? NaN);
+    return Number.isFinite(mid) ? mid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchMarketOutcomeBySlug(marketSlug) {
+  try {
+    const url = `${GAMMA_API}/markets?slug=${encodeURIComponent(marketSlug)}&closed=true`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const market = Array.isArray(data) ? data[0] : data;
+    if (!market) return null;
+
+    // Gamma API encodes token IDs and prices as JSON strings, not nested objects.
+    // clobTokenIds: "[\"tokenA\", \"tokenB\"]"
+    // outcomePrices: "[\"0\", \"1\"]"  — index matches clobTokenIds
+    let tokenIds, prices;
+    try {
+      tokenIds = JSON.parse(market.clobTokenIds ?? "[]");
+      prices   = JSON.parse(market.outcomePrices ?? "[]");
+    } catch {
+      return null;
+    }
+
+    for (let i = 0; i < tokenIds.length; i++) {
+      if (Number(prices[i]) >= 1) return { winningTokenId: String(tokenIds[i]) };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reconciles bankrollState positions that have no matching on-chain position
+ * (e.g. GTC orders that were never filled) but whose market has since resolved.
+ * Called alongside runAutoRedeem on each redeem cycle.
+ */
+export async function reconcileStalePositions(bankrollState) {
+  const events = [];
+  const now = Date.now();
+
+  for (const [tokenId, pos] of bankrollState.positions.entries()) {
+    if (settledTokenIds.has(tokenId)) continue;
+
+    const age = now - (Number(pos.openedAtMs) || 0);
+    if (age < STALE_POSITION_MS) continue;
+
+    let won = null;
+
+    const price = await fetchMidPrice(tokenId);
+    if (price !== null && price >= 1) {
+      won = true;
+    } else if (price !== null && price <= 0) {
+      won = false;
+    } else {
+      const marketSlug = String(pos.marketSlug ?? "");
+      if (marketSlug) {
+        const outcome = await fetchMarketOutcomeBySlug(marketSlug);
+        if (outcome) won = outcome.winningTokenId === tokenId;
+      }
+    }
+
+    if (won === null) continue;
+
+    settledTokenIds.add(tokenId);
+    logger.info({
+      component: "redeemer", tokenId: tokenId.slice(0, 20),
+      marketSlug: pos.marketSlug, won, ageMin: Math.round(age / 60000),
+    }, "Reconciled stale position");
+
+    events.push({
+      tokenId,
+      won,
+      closeReason: won ? "settled_win" : "settled_loss",
+      redeemed: false,
+      marketSettlementPrice: won ? 1 : 0,
+      source: "reconciliation"
+    });
+  }
+
+  return { events };
 }
 
 export async function runAutoRedeem() {
