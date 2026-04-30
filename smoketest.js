@@ -133,6 +133,37 @@ async function runSmokeTest() {
     process.exit(1);
   }
 
+  // ── [1.5] Activate Funds — sync on-chain allowance with CLOB ────────────
+  // Equivalente programático do botão "Activate Funds" da UI da Polymarket.
+  // Sem isso, fundos depositados/aprovados podem aparecer como $0.00.
+  // O SDK usa GET /balance-allowance/update com signature_type como query param.
+  try {
+    console.log(`${Y}[smoketest] Ativando fundos (balance-allowance sync)…${X}`);
+    const ts      = Math.floor(Date.now() / 1000).toString();
+    const actPath = "/balance-allowance/update";
+    const actSig  = buildHmacSignature(SECRET, ts, "GET", actPath);
+    const actQuery = `asset_type=COLLATERAL&signature_type=${SIGNATURE_TYPE}${PROXY_ADDRESS ? `&funder=${PROXY_ADDRESS}` : ""}`;
+    const activateRes = await fetch(`${CLOB_HOST}${actPath}?${actQuery}`, {
+      method: "GET",
+      headers: {
+        "Content-Type":    "application/json",
+        "POLY_ADDRESS":    walletAddress,
+        "POLY_API_KEY":    API_KEY,
+        "POLY_PASSPHRASE": PASSPHRASE,
+        "POLY_TIMESTAMP":  ts,
+        "POLY_SIGNATURE":  actSig,
+      },
+    });
+    const activateBody = await activateRes.json().catch(() => ({}));
+    if (activateRes.ok) {
+      console.log(`${G}        Activate Funds OK${X}`);
+    } else {
+      console.log(`${Y}        Activate Funds → ${activateRes.status}: ${JSON.stringify(activateBody)} (não-fatal)${X}`);
+    }
+  } catch (err) {
+    console.log(`${Y}        Activate Funds falhou (não-fatal): ${err?.message}${X}`);
+  }
+
   // ── [2] Buscar saldo USDC (COLLATERAL) ───────────────────────────────────
   let balance = "N/A";
   let allowance = "N/A";
@@ -156,7 +187,25 @@ async function runSmokeTest() {
     const { ok, status } = res;
     if (ok) {
       balance   = formatUsdc(body.balance);
-      allowance = formatUsdc(body.allowance);
+      // Schema v2: allowance pode ser objeto "allowances" com múltiplos routers
+      if (body.allowance != null) {
+        allowance = formatUsdc(body.allowance);
+      } else if (body.allowances && typeof body.allowances === "object") {
+        const vals = Object.values(body.allowances).map(Number).filter(Number.isFinite);
+        const total = vals.reduce((a, b) => a + b, 0);
+        allowance = formatUsdc(total);
+      } else {
+        allowance = "$0.00 USDC";
+      }
+      // Debug: se saldo zero, logar body raw para diagnóstico
+      const balRaw = Number(body.balance ?? 0);
+      if (balRaw <= 0) {
+        console.log(`${Y}        [debug] /balance-allowance body: ${JSON.stringify(body)}${X}`);
+        if (!PROXY_ADDRESS) {
+          console.log(`${Y}        [dica]  POLYMARKET_PROXY_ADDRESS não configurado — se a conta usa Smart Wallet,${X}`);
+          console.log(`${Y}                defina POLYMARKET_PROXY_ADDRESS e POLYMARKET_SIGNATURE_TYPE=2 no .env${X}`);
+        }
+      }
     } else {
       balance   = `ERRO ${status}: ${JSON.stringify(body)}`;
       allowance = "—";
@@ -204,6 +253,8 @@ async function runSmokeTest() {
     if (!sampleMarket && marketStatus === "N/A") {
       marketStatus = "Nenhum mercado BTC com orderbook ativo encontrado";
       orderStatus  = "—";
+      console.log(`${Y}        [debug] Nenhum mercado BTC encontrado nas páginas pesquisadas.${X}`);
+      console.log(`${Y}        [dica]  Verifique se a conexão com ${CLOB_HOST} está acessível.${X}`);
     }
   } catch (err) {
     marketStatus = `ERRO: ${err?.message ?? String(err)}`;

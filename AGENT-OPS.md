@@ -232,3 +232,115 @@ grep \$(date +%Y-%m-%d) /home/claudio/workspace/PolymarketBTC15mAssistant/logs/e
 | `signals-btc-15m.csv` | Histórico de todos os sinais e decisões BTC em CSV |
 | `signals-eth-15m.csv` | Histórico de todos os sinais e decisões ETH em CSV |
 | `counterfactual.csv` | **Novo** — uma linha por ciclo com probModel, probMarket, rawEdge, netEdge, gate que bloqueou, stake hipotético. Preencher `actual_settled_outcome` manualmente após settlement para calibrar o modelo. |
+
+---
+
+## 10. Gerar e Testar API Keys (`keygen.js` + `smoketest.js`)
+
+### Pre-requisitos
+
+1. **Node.js v18+** (usa `fetch` nativo)
+2. Dependencias instaladas: `npm install`
+3. Carteira Polygon com chave privada que ja tenha atividade na Polymarket
+
+### 10.1 — Criar o `.env`
+
+```env
+# OBRIGATORIO — chave privada da carteira Polygon (com ou sem 0x)
+PK=sua_chave_privada_aqui
+
+# Opcional — RPC customizado (padrao: https://polygon-bor-rpc.publicnode.com)
+POLYGON_RPC_URL=https://polygon-bor-rpc.publicnode.com
+
+# Opcional — endpoint CLOB (padrao: https://clob.polymarket.com)
+POLYMARKET_CLOB_HOST=https://clob.polymarket.com
+
+# Opcional — apenas se a conta usa Smart Wallet / Proxy
+# POLYMARKET_PROXY_ADDRESS=0xSeuProxyAddress
+# POLYMARKET_SIGNATURE_TYPE=2
+```
+
+### 10.2 — Gerar as API Keys
+
+```bash
+node keygen.js
+```
+
+Etapas automaticas:
+
+| Etapa | Descricao |
+|---|---|
+| **1/4** | Instancia a wallet a partir da `PK` |
+| **2/4** | Cria User API Key via EIP-712 (`POST /auth/api-key`, nonces 0-4). Se falhar, deriva via `GET /auth/derive-api-key` |
+| **3/4** | Valida credenciais com HMAC em `GET /auth/api-keys` |
+| **4/4** | Grava `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET` e `POLYMARKET_API_PASSPHRASE` no `.env` |
+
+### 10.3 — Testar a carteira e o saldo
+
+```bash
+node smoketest.js
+```
+
+O smoketest executa **4 verificacoes**:
+
+**Verificacao 1 — Autenticacao L2**
+- `GET /auth/api-keys` com HMAC
+- **401** = chaves invalidas → rodar `node keygen.js` novamente
+- **200** = autenticacao OK
+
+**Verificacao 1.5 — Activate Funds (balance-allowance sync)**
+- Chama `GET /balance-allowance/update` com `asset_type=COLLATERAL`
+- Equivalente programatico do botao "Activate Funds" da UI da Polymarket
+- **Sem esse passo, fundos depositados/aprovados aparecem como $0.00**
+- Seguro chamar repetidamente — e um no-op quando ja sincronizado
+- Nao-fatal: se falhar, o smoketest continua
+
+**Verificacao 2 — Saldo e Allowance USDC**
+- `GET /balance-allowance?asset_type=COLLATERAL` (com `signature_type` e `funder` se proxy)
+- Exibe saldo USDC (ex: `$150.00 USDC`) e allowance (permissao de gasto do contrato)
+- Valores raw (6 decimais) sao convertidos automaticamente (÷ 1.000.000)
+
+**Verificacao 3 — Mercados BTC ativos**
+- Busca mercados com "bitcoin" ou "btc" no titulo
+- Consulta o midpoint (preco medio do orderbook) de cada mercado
+- Exibe preco em centavos (ex: `midpoint 52.3c` = 52.3% de probabilidade)
+
+### 10.4 — Resultado esperado (sucesso)
+
+```
+╔══════════════════════════════════════════════════════════╗
+║  [SUCESSO] Chaves validadas e conexao L2 perfeita!       ║
+╚══════════════════════════════════════════════════════════╝
+  * Endpoint          : https://clob.polymarket.com
+  * Wallet signer     : 0xSeuEndereco
+  * Wallet funder     : 0xSeuProxy (ou mesmo endereco)
+  * Signature type    : 0 (ou 2 para proxy)
+  * POLYMARKET_API_KEY: sua-api-key
+  * Saldo USDC        : $150.00 USDC
+  * Allowance USDC    : $150.00 USDC
+  * Mercados BTC      : OK — "Will Bitcoin be above $100,000 on..."
+  * Preco (midpoint)  : OK — midpoint 52.3c
+
+  PRONTO PARA APOSTAR — saldo, allowance e mercado OK.
+```
+
+### 10.5 — Diagnostico de pendencias
+
+| Pendencia | Significado | Solucao |
+|---|---|---|
+| Saldo USDC zerado | Carteira sem USDC ou fundos nao ativados | Verificar se o Activate Funds rodou com sucesso no passo 1.5. Se sim, depositar USDC via polymarket.com ou transferir USDC nativo para o proxy address |
+| Allowance zerada | Contrato USDC sem `approve` ativo ou sync pendente | O passo 1.5 (Activate Funds) resolve automaticamente. Se persistir, fazer deposito via polymarket.com para acionar approve automatico |
+| Mercado/preco indisponivel | Nenhum mercado BTC ativo com orderbook | Temporario — tentar novamente em alguns minutos |
+
+> **Nota proxy wallets (sig type 2):** O endpoint pode retornar `$0.00` no allowance mesmo com fundos disponiveis — o CLOB gerencia via contrato proxy. O script trata esse caso e nao bloqueia.
+
+### 10.6 — Troubleshooting do keygen
+
+| Erro | Causa | Solucao |
+|---|---|---|
+| `PK ausente no .env` | Variavel `PK` nao definida | Adicionar `PK=0x...` no `.env` |
+| `.env nao encontrado` | Arquivo nao existe | Criar `.env` na raiz do projeto |
+| `Nenhum nonce produziu credenciais validas` | Carteira sem atividade na Polymarket | Fazer login em polymarket.com com essa carteira primeiro |
+| `Credenciais criadas mas rejeitadas` | Keys falharam na validacao | Rodar novamente; se persistir, contatar suporte Polymarket |
+
+> **User API Keys vs Builder API Keys:** As chaves geradas pelo `keygen.js` sao User API Keys (CLOB L2) — diferentes das "Builder API Keys" do painel da Polymarket. Sao as credenciais necessarias para negociar via CLOB API programaticamente.
