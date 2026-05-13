@@ -100,9 +100,9 @@ This prevents noisy basis from triggering false VWAP signals.
 | 4 | `paused` (losing streak ≥ 5) | `paused_losing_streak_5` |
 | 5 | Open positions ≥ MAX_POSITIONS | `max_positions_1_reached` |
 | 6 | Market slug already has open position | `position_already_open_for_market_X` |
-| 7 | `probModel < MIN_PROB` | `prob_model_X_below_0.54` |
-| 8 | `probMarket < MIN_MARKET_PROB` | `prob_market_X_below_0.55` |
-| 9 | `netEdge < MIN_NET_EDGE` or `rawEdge > MAX_EDGE` | `net_edge_X_out_of_range_0.03_0.5` |
+| 7 | `probModel < MIN_PROB` | `prob_model_X_below_0.56` |
+| 8 | `probMarket < MIN_MARKET_PROB` | `prob_market_X_below_0.56` |
+| 9 | `netEdge < MIN_NET_EDGE` or `rawEdge > MAX_EDGE` | `net_edge_X_out_of_range_0.05_0.5` |
 | 10.5 | minViableStake > maxStakeNow (price too high) | `price_X_requires_Y_above_max_stake_Z` |
 | 10 | Computed stake < MIN_TRADE_SIZE | `stake_X_below_min_1.0` |
 | 11 | Would exceed 100% bankroll exposure | `exposure_X_exceeds_Y_100pct` |
@@ -154,7 +154,7 @@ Dynamic threshold replaces fixed 50% gain:
 
 ```
 threshold = max(
-  entryPrice × 1.25,          // never sell for <25% gain  [TUNABLE]
+  entryPrice × 1.15,          // never sell for <15% gain  [TUNABLE]
   probModel + 0.10,            // market 10¢ above model conviction [TUNABLE]
   1.0 − (remainingMin / 15) × 0.15  // rises from 0.85 → 1.0 as t → 0 [TUNABLE]
 )
@@ -162,7 +162,7 @@ threshold = max(
 Sell when currentMidPrice ≥ threshold AND remainingMinutes ≥ 1
 ```
 
-**Soft stop-loss**: sell if `currentMidPrice ≤ entryPrice × 0.30` AND
+**Soft stop-loss**: sell if `currentMidPrice ≤ entryPrice × 0.40` AND
 `remainingMinutes ≥ 5` (free capital when deeply underwater with time left).
 
 **Hold window**: final 1 minute — let settlement pay $1.00.
@@ -187,9 +187,9 @@ LOSS → `losingStreak += 1`; if ≥ 5 → `paused = true`
 
 | Constant | Value | File |
 |---|---|---|
-| `MIN_PROB` | 0.54 | risk-management.js |
-| `MIN_MARKET_PROB` | 0.55 | risk-management.js |
-| `MIN_NET_EDGE` | 0.03 | risk-management.js |
+| `MIN_PROB` | 0.56 | risk-management.js |
+| `MIN_MARKET_PROB` | 0.56 | risk-management.js |
+| `MIN_NET_EDGE` | 0.05 | risk-management.js |
 | `MAX_EDGE` | 0.50 | risk-management.js |
 | `TAKER_FEE_BPS` | 156 | risk-management.js |
 | `TRADE_SLIPPAGE_DEFAULT` | 0.01 | risk-management.js |
@@ -205,10 +205,10 @@ LOSS → `losingStreak += 1`; if ≥ 5 → `paused = true`
 | `BANKROLL_RESET_TO` | $50.00 | risk-management.js |
 | `MIN_TRADE_SIZE` | $1.00 | risk-management.js |
 | Calibration `a` coefficient | 1.5 | signal-validation.js **TUNABLE** |
-| TP `minGainFloor` multiplier | 1.25 | take-profit.js **TUNABLE** |
+| TP `minGainFloor` multiplier | 1.15 | take-profit.js **TUNABLE** |
 | TP `modelConvictionCap` offset | +0.10 | take-profit.js **TUNABLE** |
 | TP `timeDecayFloor` slope | 0.15 | take-profit.js **TUNABLE** |
-| TP soft stop-loss factor | 0.30 | take-profit.js **TUNABLE** |
+| TP soft stop-loss factor | 0.40 | take-profit.js **TUNABLE** |
 | Basis stddev threshold | $25 | index.js **TUNABLE** |
 | VWAP basis margin multiplier | 0.5 | index.js **TUNABLE** |
 | `pollIntervalMs` | 1 s | config.js |
@@ -233,7 +233,7 @@ LOSS → `losingStreak += 1`; if ≥ 5 → `paused = true`
   over-penalises at low prices (< 0.20) and under-penalises at high prices
   (> 0.80). A full EV model would be more accurate but adds complexity.
 
-- **Take-profit thresholds are guessed.** 1.25×, +0.10, and 0.15 slope
+- **Take-profit thresholds are guessed.** 1.15×, +0.10, and 0.15 slope
   are priors with no backtesting. All marked TUNABLE.
 
 - **No test suite.** No unit or integration tests exist. Pure math functions

@@ -191,8 +191,8 @@ The **side** to bet is whichever edge is larger (`edgeUp >= edgeDown` → UP, el
 | 4 | Bot paused (losing streak ≥ 5) | `paused_losing_streak_5` |
 | 5 | Max concurrent positions reached (1) | `max_positions_1_reached` |
 | 6 | This market slug already has an open position | `position_already_open_for_market_X` |
-| 7 | `probModel < 0.54` | `prob_model_X_below_0.54` |
-| 8 | `probMarket < 0.55` | `prob_market_X_below_0.55` |
+| 7 | `probModel < 0.56` | `prob_model_X_below_0.56` |
+| 8 | `probMarket < 0.56` | `prob_market_X_below_0.56` |
 | 9 | Edge out of range `[0.05, 0.50]` | `edge_X_out_of_range_0.05_0.5` |
 | 10 | Computed stake < $1.00 | `stake_X_below_min_1.0` |
 | 11 | Total exposure would exceed 100% of bankroll | `exposure_X_exceeds_Y_100pct` |
@@ -203,15 +203,15 @@ If all gates pass → `canEnter: true`, reason: `ok`.
 
 | Parameter | Value | Meaning |
 |---|---|---|
-| `MIN_PROB` | 0.54 | Minimum model confidence to enter |
-| `MIN_MARKET_PROB` | 0.55 | Minimum market-implied probability for the target side |
+| `MIN_PROB` | 0.56 | Minimum model confidence to enter |
+| `MIN_MARKET_PROB` | 0.56 | Minimum market-implied probability for the target side |
 | `MIN_EDGE` | 0.05 | Minimum model-vs-market edge |
 | `MAX_EDGE` | 0.50 | Maximum edge (avoid obvious mispricings / traps) |
 | `MAX_POSITIONS` | 1 | Only one open position at a time |
 | `MAX_EXPOSURE_PCT` | 1.0 | Total exposure cannot exceed 100% of bankroll |
 | `SESSION_CEILING` | $25 | Bot stops entering if bankroll is at or above this |
 
-### Why `MIN_MARKET_PROB = 0.55`?
+### Why `MIN_MARKET_PROB = 0.56`?
 
 This gate ensures the market also prices the outcome as likely — it avoids entering when the model says UP but the crowd only prices it at e.g. 20¢. At very low market prices (e.g. 0.06 for ETH DOWN at 19:00 today), even a good model signal is blocked here.
 
@@ -367,9 +367,9 @@ This is the profit-taking / "Monaco Rule": keep $50 working capital, pocket the 
 
 Both bots consistently output `prob_model=0.5000` — the neutral/default value.
 
-The calibration table maps any `winSideRaw < 0.60` to 0.50. For that threshold to be reached, the raw score must place ≥ 60% probability on one side. With the current indicator mix (MACD, RSI, VWAP, Heiken all near-neutral), the raw score sits near 0.50, which maps to calibrated 0.50 — below the `MIN_PROB = 0.54` gate, so no entry ever fires.
+The calibration table maps any `winSideRaw < 0.60` to 0.50. For that threshold to be reached, the raw score must place ≥ 60% probability on one side. With the current indicator mix (MACD, RSI, VWAP, Heiken all near-neutral), the raw score sits near 0.50, which maps to calibrated 0.50 — below the `MIN_PROB = 0.56` gate, so no entry ever fires.
 
-Additionally, `prob_market` for ETH DOWN is 0.06 — far below `MIN_MARKET_PROB = 0.55` — so even if the model fired, the market gate would block it.
+Additionally, `prob_market` for ETH DOWN is 0.06 — far below `MIN_MARKET_PROB = 0.56` — so even if the model fired, the market gate would block it.
 
 ---
 
@@ -377,8 +377,8 @@ Additionally, `prob_market` for ETH DOWN is 0.06 — far below `MIN_MARKET_PROB 
 
 | Constant | Value | File |
 |---|---|---|
-| `MIN_PROB` | 0.54 | `risk-management.js` |
-| `MIN_MARKET_PROB` | 0.55 | `risk-management.js` |
+| `MIN_PROB` | 0.56 | `risk-management.js` |
+| `MIN_MARKET_PROB` | 0.56 | `risk-management.js` |
 | `MIN_EDGE` | 0.05 | `risk-management.js` |
 | `MAX_EDGE` | 0.50 | `risk-management.js` |
 | `MAX_STAKE` | $1.00 | `risk-management.js` |
@@ -390,7 +390,7 @@ Additionally, `prob_market` for ETH DOWN is 0.06 — far below `MIN_MARKET_PROB 
 | `WITHDRAWAL_TRIGGER` | $150.00 | `risk-management.js` |
 | `WITHDRAWAL_AMOUNT` | $100.00 | `risk-management.js` |
 | `BANKROLL_RESET_TO` | $50.00 | `risk-management.js` |
-| `TAKE_PROFIT_THRESHOLD` | 50% gain | `take-profit.js` |
+| `TAKE_PROFIT_THRESHOLD` | 15% gain (min floor) | `take-profit.js` |
 | `TRADE_SLIPPAGE` | 0.01 (1%) | `index.js` (env) |
 | `pollIntervalMs` | 1 s | `config.js` |
 | `candleWindowMinutes` | 15 min | `config.js` |

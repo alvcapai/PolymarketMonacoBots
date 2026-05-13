@@ -8,7 +8,7 @@
  *   npm run start:btc15m  |  start:eth15m
  */
 
-const TIMEFRAME = (process.env.TIMEFRAME || "btc-15m").trim().toLowerCase();
+const TIMEFRAME = (process.env.TIMEFRAME || "eth-15m").trim().toLowerCase();
 
 // Normalise legacy values: "15m" → "btc-15m"
 const tfNorm = TIMEFRAME.includes("-") ? TIMEFRAME : `btc-${TIMEFRAME}`;

@@ -2,7 +2,7 @@ import { executeSell } from "./executor.js";
 import { logger } from "../logging/logger.js";
 
 const MIN_TIME_LEFT_MIN = 1;       // hold in final 1 min — let settlement pay $1 (was 2)
-const STOP_LOSS_FACTOR = 0.30;     // sell if position dropped to 30% of entry price (−70%)
+const STOP_LOSS_FACTOR = 0.40;     // sell if position dropped to 40% of entry price (−60%)
 const MIN_TIME_FOR_STOP_LOSS = 5;  // don't cut losses if <5 min left — let it settle
 const CLOB_HOST = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
 const TRADE_MOCK = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
@@ -15,7 +15,7 @@ const takenProfitTokens = new Set();
 function computeSellThreshold({ entryPrice, probModel, remainingMinutes }) {
   const remClamped = Math.max(0, Math.min(remainingMinutes ?? 15, 15));
 
-  const minGainFloor = entryPrice * 1.25;             // never exit for <25% gain
+  const minGainFloor = entryPrice * 1.15;             // never exit for <15% gain
   const modelConvictionCap = (probModel ?? 0.5) + 0.10; // market priced 10¢ above model
   const timeDecayFloor = 1.0 - (remClamped / 15) * 0.15; // rises from 0.85 → 1.0 as t→0
 
