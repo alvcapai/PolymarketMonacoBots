@@ -105,7 +105,7 @@ function formatCents(price) {
  * "Activate Funds" button shown in the Polymarket UI after a deposit/approve.
  * Safe to call repeatedly — it's a no-op when already synced.
  */
-async function ensureBalanceAllowance() {
+export async function ensureBalanceAllowance() {
   if (!clobClient) return;
   try {
     await clobClient.updateBalanceAllowance({ asset_type: "COLLATERAL" });
@@ -403,9 +403,7 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
   // ── Modo Real (CLOB V2) ─────────────────────────────────────────────────
   logger.info({ component: "executor", action: "BUY", tokenId, usdcSize, shareSize, price, probability: probabilityN }, "Placing real order");
 
-  // Sync on-chain allowance with CLOB ("Activate Funds")
-  await ensureBalanceAllowance();
-
+  // Removed ensureBalanceAllowance() from hot path
   // CLOB V2: createAndPostOrder creates, signs, and posts in one call
   let response;
   try {
@@ -472,9 +470,7 @@ export async function executeSell(tokenId, shareSize, limitPrice) {
 
   logger.info({ component: "executor", action: "SELL", tokenId: token, shareSize: roundedSize, price: roundedPrice }, "Placing SELL order");
 
-  // Sync on-chain allowance with CLOB ("Activate Funds")
-  await ensureBalanceAllowance();
-
+  // Removed ensureBalanceAllowance() from hot path
   let response;
   try {
     response = await clobClient.createAndPostOrder(

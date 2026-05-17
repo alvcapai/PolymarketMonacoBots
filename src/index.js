@@ -35,10 +35,13 @@ import {
 import { saveBankrollState, loadBankrollState } from "./engines/bankroll-persist.js";
 import { appendCsvRow, formatNumber, formatPct, getCandleWindowTiming, sleep } from "./utils.js";
 import { startBinanceTradeStream } from "./data/binanceWs.js";
-import readline from "node:readline";
+import {
+  ANSI, fmtTimeLeft, screenWidth, sepLine, kv, renderScreen,
+  formatProbPct, fmtEtTime, getBtcSession, colorPriceLine, centerText
+} from "./logging/ui.js";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
 import { logger } from "./logging/logger.js";
-import { executeTrade, fetchUsdcBalance, transferUsdc, WITHDRAWAL_ADDRESS } from "./trade/executor.js";
+import { executeTrade, fetchUsdcBalance, transferUsdc, WITHDRAWAL_ADDRESS, ensureBalanceAllowance } from "./trade/executor.js";
 import { runAutoRedeem, reconcileStalePositions } from "./trade/redeemer.js";
 import { checkTakeProfit } from "./trade/take-profit.js";
 import {
@@ -49,6 +52,7 @@ import {
   recordBlockReason
 } from "./engines/trade-telemetry.js";
 import { logCounterfactual } from "./logging/counterfactual-log.js";
+import { logTradeEntry, logTradeExit } from "./logging/trade-log.js";
 
 applyGlobalProxyFromEnv();
 
@@ -59,136 +63,7 @@ let isPlacingOrder = false;
 // Rolling 30-candle history of (binanceClose − chainlinkPrice) for basis monitoring.
 const basisHistory = [];
 
-const ANSI = {
-  reset: "\x1b[0m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  gray: "\x1b[90m",
-  white: "\x1b[97m",
-  dim: "\x1b[2m"
-};
 
-const BALANCE_TTL_MS = 30_000;
-const REDEEM_INTERVAL_MS = 2 * 60 * 1000;
-const TAKE_PROFIT_INTERVAL_MS = 10 * 1000;
-const LABEL_W = 18;
-const MODEL_VERSION = "v1-edge-calibrated";
-
-function marketTypeFromTimeframe(timeframe) {
-  const [asset, window] = String(timeframe ?? "").split("-");
-  if (!asset || !window) return String(timeframe ?? "UNKNOWN");
-  return `${asset.toUpperCase()}${window}`;
-}
-
-function countVwapCrosses(closes, vwapSeries, lookback) {
-  if (closes.length < lookback || vwapSeries.length < lookback) return null;
-  let crosses = 0;
-  for (let i = closes.length - lookback + 1; i < closes.length; i += 1) {
-    const prev = closes[i - 1] - vwapSeries[i - 1];
-    const cur = closes[i] - vwapSeries[i];
-    if (prev === 0) continue;
-    if ((prev > 0 && cur < 0) || (prev < 0 && cur > 0)) crosses += 1;
-  }
-  return crosses;
-}
-
-function fmtTimeLeft(mins) {
-  const totalSeconds = Math.max(0, Math.floor(mins * 60));
-  const m = Math.floor(totalSeconds / 60);
-  const s = totalSeconds % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-function stripAnsi(s) {
-  return String(s).replace(/\x1b\[[0-9;]*m/g, "");
-}
-
-function screenWidth() {
-  const w = Number(process.stdout?.columns);
-  return Number.isFinite(w) && w >= 40 ? w : 80;
-}
-
-function sepLine(ch = "-") {
-  return `${ANSI.white}${ch.repeat(screenWidth())}${ANSI.reset}`;
-}
-
-function padLabel(label, width) {
-  const visible = stripAnsi(label).length;
-  if (visible >= width) return label;
-  return label + " ".repeat(width - visible);
-}
-
-function centerText(text, width) {
-  const visible = stripAnsi(text).length;
-  if (visible >= width) return text;
-  const left = Math.floor((width - visible) / 2);
-  const right = width - visible - left;
-  return " ".repeat(left) + text + " ".repeat(right);
-}
-
-function kv(label, value) {
-  return `${padLabel(String(label), LABEL_W)}${value}`;
-}
-
-function renderScreen(text) {
-  try {
-    readline.cursorTo(process.stdout, 0, 0);
-    readline.clearScreenDown(process.stdout);
-  } catch {
-    // ignore
-  }
-  process.stdout.write(text);
-}
-
-function formatProbPct(p, digits = 1) {
-  if (p === null || p === undefined || !Number.isFinite(Number(p))) return "-";
-  return `${(Number(p) * 100).toFixed(digits)}%`;
-}
-
-function fmtEtTime(now = new Date()) {
-  try {
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false
-    }).format(now);
-  } catch {
-    return "-";
-  }
-}
-
-function getBtcSession(now = new Date()) {
-  const h = now.getUTCHours();
-  const inAsia = h >= 0 && h < 8;
-  const inEurope = h >= 7 && h < 16;
-  const inUs = h >= 13 && h < 22;
-
-  if (inEurope && inUs) return "Europe/US overlap";
-  if (inAsia && inEurope) return "Asia/Europe overlap";
-  if (inAsia) return "Asia";
-  if (inEurope) return "Europe";
-  if (inUs) return "US";
-  return "Off-hours";
-}
-
-function colorPriceLine({ label, price, prevPrice, decimals = 0, prefix = "" }) {
-  if (price === null || price === undefined) {
-    return `${label}: ${ANSI.gray}-${ANSI.reset}`;
-  }
-
-  const p = Number(price);
-  const prev = prevPrice === null || prevPrice === undefined ? null : Number(prevPrice);
-  let color = ANSI.reset;
-  let marker = "";
-  if (prev !== null && Number.isFinite(prev) && Number.isFinite(p) && p !== prev) {
-    color = p > prev ? ANSI.green : ANSI.red;
-    marker = p > prev ? " UP" : " DOWN";
-  }
-  return `${label}: ${color}${prefix}${formatNumber(p, decimals)}${marker}${ANSI.reset}`;
-}
 
 function toDecisionSignal(decision) {
   if (!decision?.canEnter) return "NO TRADE";
@@ -335,6 +210,18 @@ function processOutcomeEvents(bankrollState, events) {
         losing_streak_after: bankrollState.losingStreak,
         pnl_realized: pnlRealized
       });
+
+      logTradeExit({
+        market: closedSlug || "unknown",
+        side: position.side || "unknown",
+        entryPrice: position.entryPrice,
+        exitPrice: event.marketSettlementPrice,
+        pnlUsdc: pnlRealized,
+        roi: pnlRealized / (position.stakeUsed || outcome.stakeUsed || 1),
+        reason: event.closeReason ?? event.source ?? (event.won ? "settled_win" : "settled_loss"),
+        holdSec: (Date.now() - (position.openedAtMs || Date.now())) / 1000,
+        remainingMinutesAtExit: null // Not easily available here, could fetch if needed
+      });
     }
 
     logger.info({
@@ -354,6 +241,7 @@ async function main() {
   });
 
   const bankrollState = loadBankrollState(CONFIG.bankrollStatePath, 20);
+  await ensureBalanceAllowance();
 
   let cachedBalance = null;
   let lastBalanceCheckMs = 0;
@@ -437,6 +325,7 @@ async function main() {
         logger.info({ component: "withdrawal", bankroll: bankrollState.bankroll, withdrawAmount, to: WITHDRAWAL_ADDRESS, resetTo }, "Withdrawal triggered");
         try {
           const result = await transferUsdc(WITHDRAWAL_ADDRESS, withdrawAmount);
+          await ensureBalanceAllowance();
           recordWithdrawal(bankrollState);
           cachedBalance = resetTo;
           lastBalanceCheckMs = Date.now();
@@ -700,12 +589,7 @@ async function main() {
           tradedTokens.add(targetTokenId);
           isPlacingOrder = true;
           try {
-            // Ensure shareSize >= MIN_SHARES (5) at the actual fill price.
-            // risk-management computes minViableStake using probMarket, but
-            // targetPrice = rawAsk + slippage is always higher, so the computed
-            // shares can fall below 5 — causing the CLOB to silently reject the fill.
-            const minStake = Math.ceil(5 * targetPrice * 100) / 100;
-            const effectiveStake = Math.max(decision.stake, minStake);
+            const effectiveStake = decision.stake;
 
             await executeTrade(
               targetTokenId,
@@ -757,6 +641,26 @@ async function main() {
               time_left_min: timeLeftMin,
               model_version: MODEL_VERSION
             });
+
+            logTradeEntry({
+              market: marketSlug,
+              side: decision.side,
+              entryPrice: targetPrice,
+              shares: shareSize,
+              usdcSpent: effectiveStake,
+              rawUp: scored.rawUp,
+              adjustedUp: timeAware.adjustedUp,
+              probModelUp: calibrated.probModelUp,
+              marketUpProb: edge.marketUp,
+              rawEdge: decision.rawEdge,
+              netEdge: decision.edge,
+              vwapMargin,
+              basisStdDev: basisStddev,
+              remainingMinutes: timeLeftMin,
+              losingStreak: losingStreakBefore,
+              bankroll: bankrollBefore
+            });
+
             logger.info({ component: "auto-trade", marketSlug }, "Order confirmed by API");
           } catch (err) {
             tradedTokens.delete(targetTokenId);

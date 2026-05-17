@@ -1,9 +1,13 @@
-export const MIN_NET_EDGE = 0.05; // was MIN_EDGE = 0.05; lowered because we now subtract fees before gating
+import { logger } from "../logging/logger.js";
+import { getSideWinRate, recordOutcome } from "./side-performance.js";
+
+export const MIN_NET_EDGE = 0.08; // was 0.05
 export const MAX_EDGE = 0.50;
 const TAKER_FEE_BPS = 156; // conservative upper bound for 15m market taker fee (~1.56%)
-export const MIN_PROB = 0.56;
+export const MIN_PROB = 0.62; // was 0.56
 export const MIN_MARKET_PROB = 0.56;
-const MAX_STAKE_PCT = 0.05;      // 5% of bankroll
+const MAX_STAKE_PCT = 0.10;      // reduced from 15% -> 10% per trade
+export const MAX_ENTRY_PRICE = 0.65; // NEW: refuse entries when best-ask > 0.65
 const MAX_STAKE_ABSOLUTE = 10.0; // hard cap regardless of bankroll size
 export const MAX_POSITIONS = 1;
 export const MAX_EXPOSURE_PCT = 1.0;
@@ -56,11 +60,12 @@ export function syncBankroll(state, realBalance) {
 }
 
 export function checkWithdrawal(state) {
-  if (state.bankroll >= WITHDRAWAL_TRIGGER) {
+  const freeCapital = state.bankroll - state.totalExposure;
+  if (freeCapital >= WITHDRAWAL_TRIGGER) {
     return {
       shouldWithdraw: true,
       withdrawAmount: WITHDRAWAL_AMOUNT,
-      resetTo: BANKROLL_RESET_TO
+      resetTo: state.bankroll - WITHDRAWAL_AMOUNT
     };
   }
   return { shouldWithdraw: false, withdrawAmount: 0, resetTo: 0 };
@@ -104,16 +109,22 @@ export function edgeMultiplier(edge) {
 
 export function stakeBase(bankroll) {
   if (!Number.isFinite(bankroll) || bankroll <= 0) return MIN_TRADE_SIZE;
-  const pct = bankroll < 50 ? 0.12 : 0.15;
+  const pct = 0.15; // Flat 15% rate, avoiding sudden cliffs
   return Math.max(bankroll * pct, MIN_TRADE_SIZE);
 }
 
-export function computeStake(state, edge) {
+export function computeStake(state, edge, basisStdDev = null) {
   const mult = edgeMultiplier(edge);
   if (mult === 0) return 0;
 
   const maxStake = computeMaxStake(state.bankroll);
   let stake = stakeBase(state.bankroll) * mult;
+
+  if (typeof basisStdDev === 'number' && basisStdDev > 40) {
+    stake *= 0.5;
+    logger.info(`[risk] basis_stddev=${basisStdDev.toFixed(1)} > 40 -> stake halved`);
+  }
+
   if (state.losingStreak >= 3) {
     stake *= 0.5;
   }
@@ -129,7 +140,8 @@ export function decideEntry(state, {
   marketSlug,
   priceUp = null,
   priceDown = null,
-  slippage = TRADE_SLIPPAGE_DEFAULT
+  slippage = TRADE_SLIPPAGE_DEFAULT,
+  basisStdDev = null
 }) {
   // Re-evaluate floor on every entry attempt so cycleEnded is always
   // coherent with the current bankroll, regardless of when checkCycleFloor
@@ -169,7 +181,27 @@ export function decideEntry(state, {
   const costAsProb = (TAKER_FEE_BPS / 10000 + slippage) / denominator;
   const netEdge = rawEdge - costAsProb;
 
-  let stake = computeStake(state, netEdge);
+  // Hard guard: entry price cap
+  const rawPrice = toFiniteOrNull(side === "UP" ? priceUp : priceDown);
+  const tokenPrice = rawPrice !== null ? rawPrice + slippage : null;
+  if (tokenPrice !== null && tokenPrice > MAX_ENTRY_PRICE) {
+    return {
+      canEnter: false,
+      reason: `entry_price_too_high (price=${tokenPrice.toFixed(3)} > cap=${MAX_ENTRY_PRICE})`,
+      side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
+    };
+  }
+
+  let stake = computeStake(state, netEdge, basisStdDev);
+
+  const sideStats = getSideWinRate(side);
+  if (sideStats.rate !== null && sideStats.rate < 0.40) {
+    stake *= 0.5;
+    logger.warn(
+      `[risk] side=${side} winrate=${(sideStats.rate*100).toFixed(0)}% ` +
+      `over last ${sideStats.sample} -> stake halved`
+    );
+  }
 
   if (state.cycleEnded) {
     return { canEnter: false, reason: "cycle_ended", side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0 };
@@ -254,9 +286,10 @@ export function decideEntry(state, {
   // 2. If that minimum exceeds our risk cap (15% bankroll), skip the trade.
   // 3. Otherwise use max(kellyStake, minViable) capped at riskCap.
   const riskCap = state.bankroll * BANKROLL_RISK_CAP;
-  const tokenPrice = toFiniteOrNull(side === "UP" ? priceUp : priceDown);
-  if (tokenPrice !== null && tokenPrice > 0) {
-    const minViableStake = MIN_SHARES * tokenPrice * (1 + slippage);
+  const rawPrice = toFiniteOrNull(side === "UP" ? priceUp : priceDown);
+  if (rawPrice !== null && rawPrice > 0) {
+    const targetPrice = Math.min(Math.round((rawPrice + slippage) * 100) / 100, 0.97);
+    const minViableStake = MIN_SHARES * targetPrice; // exactly enough to buy 5 shares at target price
     if (minViableStake > riskCap) {
       return {
         canEnter: false,
@@ -357,6 +390,8 @@ export function recordOutcomeByToken(state, tokenId, won) {
   } else {
     state.losingStreak += 1;
   }
+
+  recordOutcome(pos.side, won);
 
   return {
     updated: true,

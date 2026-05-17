@@ -41,8 +41,8 @@ export function calibrateModelProbabilities(rawUp) {
     return { probModelUp: null, probModelDown: null };
   }
 
-  // a = 6.0 — TUNABLE AFTER DATA COLLECTION
-  const a = 6.0;
+  // a = 8.8 (equivalent to a=2.2 * 4) -> steeper sigmoid, separates high-conviction
+  const a = 8.8;
   const calibratedUp = 1 / (1 + Math.exp(-a * (up - 0.5)));
 
   return {
