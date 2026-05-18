@@ -286,7 +286,7 @@ export function decideEntry(state, {
   // 2. If that minimum exceeds our risk cap (15% bankroll), skip the trade.
   // 3. Otherwise use max(kellyStake, minViable) capped at riskCap.
   const riskCap = state.bankroll * BANKROLL_RISK_CAP;
-  const rawPrice = toFiniteOrNull(side === "UP" ? priceUp : priceDown);
+  // rawPrice redefined earlier in entry price guard
   if (rawPrice !== null && rawPrice > 0) {
     const targetPrice = Math.min(Math.round((rawPrice + slippage) * 100) / 100, 0.97);
     const minViableStake = MIN_SHARES * targetPrice; // exactly enough to buy 5 shares at target price
