@@ -22,7 +22,6 @@ import { scoreDirection, applyTimeAwareness } from "./engines/probability.js";
 import { computeEdge } from "./engines/edge.js";
 import { calibrateModelProbabilities } from "./engines/signal-validation.js";
 import {
-  createBankrollState,
   initStateManager,
   loadBankrollState,
   saveBankrollState,
@@ -33,8 +32,7 @@ import {
   decideEntry,
   recordOpenPosition,
   recordOutcomeByToken,
-  formatDiagnostics,
-  MIN_TRADE_SIZE
+  getMinTradeSize
 } from "./engines/risk-management.js";
 import { appendCsvRow, formatNumber, formatPct, getCandleWindowTiming, sleep } from "./utils.js";
 import { startBinanceTradeStream } from "./data/binanceWs.js";
@@ -63,10 +61,38 @@ const tradedTokens = new Set();
 const tradedMarketSlugs = new Set();
 let isPlacingOrder = false;
 
+const MODEL_VERSION = "risk-params-v1";
+const BALANCE_TTL_MS = 30_000;
+const REDEEM_INTERVAL_MS = 2 * 60_000;
+const TAKE_PROFIT_INTERVAL_MS = 10_000;
+
 // Rolling 30-candle history of (binanceClose − chainlinkPrice) for basis monitoring.
 const basisHistory = [];
 
+function countVwapCrosses(closes, vwapSeries, lookback = 20) {
+  const end = Math.min(closes.length, vwapSeries.length);
+  const start = Math.max(1, end - lookback);
+  let crosses = 0;
+  let prevSide = null;
 
+  for (let i = start; i < end; i += 1) {
+    const close = Number(closes[i]);
+    const vwap = Number(vwapSeries[i]);
+    if (!Number.isFinite(close) || !Number.isFinite(vwap)) continue;
+
+    const side = close > vwap ? 1 : close < vwap ? -1 : 0;
+    if (side === 0) continue;
+    if (prevSide !== null && side !== prevSide) crosses += 1;
+    prevSide = side;
+  }
+
+  return crosses;
+}
+
+function marketTypeFromTimeframe(timeframe) {
+  const [asset, window] = String(timeframe ?? "").split("-");
+  return `${asset || "unknown"}_${window || "unknown"}`;
+}
 
 function toDecisionSignal(decision) {
   if (!decision?.canEnter) return "NO TRADE";
@@ -196,7 +222,8 @@ function processOutcomeEvents(bankrollState, events) {
         stake: position.stakeUsed ?? outcome.stakeUsed,
         entryPrice: position.entryPrice,
         shareSize: position.shareSize,
-        won: event.won
+        won: event.won,
+        proceeds: event.proceeds
       });
 
       recordTradeClose({
@@ -238,7 +265,7 @@ async function main() {
   // Initialize configuration and state management
   try {
     initConfigLoader();
-    initStateManager("./data/bankroll-state.json");
+    initStateManager(CONFIG.bankrollStatePath);
     logger.info("[init] Bot initialization completed successfully");
   } catch (error) {
     logger.error("[init] Bot initialization failed:", error);
@@ -253,7 +280,7 @@ async function main() {
     aggregator: CONFIG.chainlink.assetUsdAggregator
   });
 
-  const bankrollState = loadBankrollState(CONFIG.bankrollStatePath, 20);
+  const bankrollState = loadBankrollState(20);
   await ensureBalanceAllowance();
 
   let cachedBalance = null;
@@ -379,6 +406,7 @@ async function main() {
         lastTakeProfitCheckMs = Date.now();
         const tpReport = await checkTakeProfit(bankrollState, { settlementLeftMin });
         processOutcomeEvents(bankrollState, Array.isArray(tpReport?.events) ? tpReport.events : []);
+        if ((tpReport?.events?.length ?? 0) > 0) persistNow();
       }
 
       const closes = klines1m.map((c) => c.close);
@@ -465,7 +493,8 @@ async function main() {
         marketSlug,
         priceUp: rawPriceUp,
         priceDown: rawPriceDown,
-        slippage: tradeSlippage
+        slippage: tradeSlippage,
+        basisStdDev: basisStddev
       });
 
       const signal = toDecisionSignal(decision);
@@ -578,7 +607,7 @@ async function main() {
           logger.warn({ component: "auto-trade", targetTokenId }, "Blocked — token already traded this session");
         } else if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
           logger.error({ component: "auto-trade", rawPriceValue }, "Blocked — invalid price");
-        } else if (!Number.isFinite(decision.stake) || decision.stake < MIN_TRADE_SIZE) {
+        } else if (!Number.isFinite(decision.stake) || decision.stake < getMinTradeSize()) {
           logger.error({ component: "auto-trade", stake: decision.stake }, "Blocked — invalid stake");
         } else if (isPlacingOrder) {
           logger.warn({ component: "auto-trade" }, "Order already in progress");

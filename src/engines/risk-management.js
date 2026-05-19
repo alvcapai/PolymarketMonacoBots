@@ -28,12 +28,12 @@ export function initStateManager(stateFilePath) {
   stateManager = new StateManager(stateFilePath);
 }
 
-export function loadBankrollState() {
+export function loadBankrollState(initialBankroll = 20) {
   if (!stateManager) {
     throw new Error("State manager not initialized");
   }
   
-  const defaultState = createBankrollState(20);
+  const defaultState = createBankrollState(initialBankroll);
   const serialized = stateManager.loadState(serializeState(defaultState));
   return deserializeState(serialized);
 }
@@ -45,32 +45,6 @@ export function saveBankrollState(state) {
   
   stateManager.saveState(serializeState(state));
 }
-
-// Backward compatibility exports (deprecated)
-
-export const MIN_NET_EDGE = 0.08; // was 0.05
-export const MAX_EDGE = 0.50;
-const TAKER_FEE_BPS = getTakerFeeBps(); // conservative upper bound for 15m market taker fee (~1.56%)
-export const MIN_PROB = 0.62; // was 0.56
-export const MIN_MARKET_PROB = 0.56;
-const MAX_STAKE_PCT = getMaxStakePct();      // reduced from 15% -> 10% per trade
-export const MAX_ENTRY_PRICE = 0.65; // NEW: refuse entries when best-ask > 0.65
-const MAX_STAKE_ABSOLUTE = getMaxStakeAbsolute(); // hard cap regardless of bankroll size
-export const MAX_POSITIONS = 1;
-export const MAX_EXPOSURE_PCT = 1.0;
-export const WITHDRAWAL_TRIGGER = 150;
-export const WITHDRAWAL_AMOUNT = 100;
-export const BANKROLL_RESET_TO = 50;
-export const MIN_TRADE_SIZE = 1.0;
-
-const MIN_SHARES = getMinShares();            // Polymarket minimum share size
-const BANKROLL_RISK_CAP = getBankrollRiskCap();    // max 15% of bankroll per trade
-const TRADE_SLIPPAGE_DEFAULT = getTradeSlippageDefault();
-
-const CYCLE_FLOOR = {
-  initial: 0,
-  recurring: 0
-};
 
 function recalcExposure(state) {
   let total = 0;
@@ -128,7 +102,8 @@ export function recordWithdrawal(state) {
 }
 
 export function checkCycleFloor(state) {
-  const floor = state.cycleNumber === 1 ? CYCLE_FLOOR.initial : CYCLE_FLOOR.recurring;
+  const cfg = getConfig();
+  const floor = state.cycleNumber === 1 ? cfg.cycle.floor_initial : cfg.cycle.floor_recurring;
   if (state.bankroll < floor) {
     state.cycleEnded = true;
     return {
@@ -155,7 +130,7 @@ export function edgeMultiplier(edge) {
 }
 
 export function stakeBase(bankroll) {
-  if (!Number.isFinite(bankroll) || bankroll <= 0) return MIN_TRADE_SIZE;
+  if (!Number.isFinite(bankroll) || bankroll <= 0) return getMinTradeSize();
   const pct = 0.15; // Flat 15% rate, avoiding sudden cliffs
   return Math.max(bankroll * pct, getMinTradeSize());
 }
@@ -187,7 +162,7 @@ export function decideEntry(state, {
   marketSlug,
   priceUp = null,
   priceDown = null,
-  slippage = TRADE_SLIPPAGE_DEFAULT,
+  slippage = getTradeSlippageDefault(),
   basisStdDev = null
 }) {
   // Re-evaluate floor on every entry attempt so cycleEnded is always
@@ -225,7 +200,7 @@ export function decideEntry(state, {
   // cost = (fee + slippage) / (1 - tokenPrice) — approximation of break-even premium.
   const tokenMarketProb = side === "UP" ? mktUp : mktDown;
   const denominator = Math.max(1 - tokenMarketProb, 0.01); // guard against price → 1
-  const costAsProb = (TAKER_FEE_BPS / 10000 + slippage) / denominator;
+  const costAsProb = (getTakerFeeBps() / 10000 + slippage) / denominator;
   const netEdge = rawEdge - costAsProb;
 
   // Hard guard: entry price cap
@@ -234,7 +209,7 @@ export function decideEntry(state, {
   if (tokenPrice !== null && tokenPrice > getMaxEntryPrice()) {
     return {
       canEnter: false,
-      reason: `entry_price_too_high (price=${tokenPrice.toFixed(3)} > cap=${MAX_ENTRY_PRICE})`,
+      reason: `entry_price_too_high (price=${tokenPrice.toFixed(3)} > cap=${getMaxEntryPrice()})`,
       side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
     };
   }
@@ -256,7 +231,7 @@ export function decideEntry(state, {
   if (state.openPositions >= getMaxPositions()) {
     return {
       canEnter: false,
-      reason: `max_positions_${MAX_POSITIONS}_reached`,
+      reason: `max_positions_${getMaxPositions()}_reached`,
       side,
       probModel,
       probMarket,
@@ -289,7 +264,7 @@ export function decideEntry(state, {
   if (probModel < getMinProb()) {
     return {
       canEnter: false,
-      reason: `prob_model_${probModel.toFixed(4)}_below_${MIN_PROB}`,
+      reason: `prob_model_${probModel.toFixed(4)}_below_${getMinProb()}`,
       side,
       probModel,
       probMarket,
@@ -303,7 +278,7 @@ export function decideEntry(state, {
   if (probMarket < getMinMarketProb()) {
     return {
       canEnter: false,
-      reason: `prob_market_${probMarket.toFixed(4)}_below_${MIN_MARKET_PROB}`,
+      reason: `prob_market_${probMarket.toFixed(4)}_below_${getMinMarketProb()}`,
       side,
       probModel,
       probMarket,
@@ -317,7 +292,7 @@ export function decideEntry(state, {
   if (netEdge < getMinNetEdge() || rawEdge > getMaxEdge()) {
     return {
       canEnter: false,
-      reason: `net_edge_${netEdge.toFixed(4)}_out_of_range_${MIN_NET_EDGE}_${MAX_EDGE}`,
+      reason: `net_edge_${netEdge.toFixed(4)}_out_of_range_${getMinNetEdge()}_${getMaxEdge()}`,
       side,
       probModel,
       probMarket,
@@ -332,11 +307,11 @@ export function decideEntry(state, {
   // 1. Compute the minimum viable stake (MIN_SHARES platform minimum).
   // 2. If that minimum exceeds our risk cap (15% bankroll), skip the trade.
   // 3. Otherwise use max(kellyStake, minViable) capped at riskCap.
-  const riskCap = state.bankroll * BANKROLL_RISK_CAP;
+  const riskCap = state.bankroll * getBankrollRiskCap();
   // rawPrice redefined earlier in entry price guard
   if (rawPrice !== null && rawPrice > 0) {
     const targetPrice = Math.min(Math.round((rawPrice + slippage) * 100) / 100, 0.97);
-    const minViableStake = MIN_SHARES * targetPrice; // exactly enough to buy 5 shares at target price
+    const minViableStake = getMinShares() * targetPrice;
     if (minViableStake > riskCap) {
       return {
         canEnter: false,
@@ -350,7 +325,7 @@ export function decideEntry(state, {
   if (!Number.isFinite(stake) || stake < getMinTradeSize()) {
     return {
       canEnter: false,
-      reason: `stake_${stake}_below_min_${MIN_TRADE_SIZE}`,
+      reason: `stake_${stake}_below_min_${getMinTradeSize()}`,
       side,
       probModel,
       probMarket,

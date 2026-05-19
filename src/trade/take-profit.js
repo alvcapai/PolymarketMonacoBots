@@ -107,7 +107,6 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
         continue;
       }
       
-      removePositionFromState(bankrollState, tokenId, pos);
       events.push({
         tokenId,
         won: false,
@@ -144,7 +143,6 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
       continue;
     }
 
-    removePositionFromState(bankrollState, tokenId, pos);
     events.push({
       tokenId,
       won: true,

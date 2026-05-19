@@ -39,11 +39,13 @@ export function recordTradeClose(data) {
   return record;
 }
 
-export function estimatePnlRealized({ stake, entryPrice, shareSize, won }) {
+export function estimatePnlRealized({ stake, entryPrice, shareSize, won, proceeds = null }) {
   const s = Number(stake);
+  const received = Number(proceeds);
   const p = Number(entryPrice);
   const sh = Number(shareSize);
   if (!Number.isFinite(s) || s <= 0) return 0;
+  if (Number.isFinite(received)) return received - s;
   if (!won) return -s;
   if (Number.isFinite(sh) && sh > 0) return sh - s;
   if (Number.isFinite(p) && p > 0 && p < 1) return s * ((1 / p) - 1);

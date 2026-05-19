@@ -17,6 +17,7 @@ const SIGNATURE_TYPE = Number(process.env.POLYMARKET_SIGNATURE_TYPE ?? (PROXY_AD
 // Default tickSize and negRisk for BTC/ETH up-or-down markets
 const TICK_SIZE = "0.01";
 const NEG_RISK  = false;
+const IMMEDIATE_ORDER_TYPE = OrderType.FOK ?? "FOK";
 
 // Destination wallet for automatic profit withdrawals
 const WITHDRAWAL_ADDRESS = String(
@@ -311,7 +312,7 @@ export async function transferUsdc(toAddress, amountUsdc) {
   const transferData = usdcIface.encodeFunctionData("transfer", [toAddress, amount]);
 
   // ── Modo EOA direto (sig type 0 ou 1) ───────────────────────────────────
-  if (SIGNATURE_TYPE !== 2 || !PROXY_ADDRESS) {
+  if (effectiveSigType !== 2 || !effectiveProxy) {
     const usdc = new Contract(USDC_ADDRESS, ERC20_ABI, signerWallet);
     const tx   = await usdc.transfer(toAddress, amount);
     logger.info({ component: "executor", action: "WITHDRAW", txHash: tx.hash }, "Withdrawal tx sent");
@@ -320,7 +321,7 @@ export async function transferUsdc(toAddress, amountUsdc) {
   }
 
   // ── Modo Gnosis Safe (sig type 2) — execTransaction ──────────────────────
-  const safe = new Contract(PROXY_ADDRESS, SAFE_ABI, signerWallet.provider);
+  const safe = new Contract(effectiveProxy, SAFE_ABI, signerWallet.provider);
 
   const safeNonce = await safe.nonce();
 
@@ -337,7 +338,7 @@ export async function transferUsdc(toAddress, amountUsdc) {
     nonce:          safeNonce,
   };
 
-  const domain = { chainId: 137, verifyingContract: PROXY_ADDRESS };
+  const domain = { chainId: 137, verifyingContract: effectiveProxy };
   const signature = await signerWallet.signTypedData(domain, SAFE_TX_TYPES, safeTx);
 
   const safeWithSigner = safe.connect(signerWallet);
@@ -416,7 +417,7 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
         size:    shareSize,
       },
       { tickSize: TICK_SIZE, negRisk: NEG_RISK },
-      OrderType.GTC,
+      IMMEDIATE_ORDER_TYPE,
     );
   } catch (err) {
     logger.error({ component: "executor", err: err?.message }, "Exception sending BUY order");
@@ -433,6 +434,10 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
   if (!response || typeof response !== "object") {
     logger.error({ component: "executor", response }, "Unexpected API response for BUY order");
     throw new Error(`[executor] Resposta inesperada da API: ${JSON.stringify(response)}`);
+  }
+  if (response.success === false) {
+    logger.error({ component: "executor", response }, "BUY order was not successful");
+    throw new Error(`[executor] Ordem BUY não executada: ${JSON.stringify(response)}`);
   }
 
   logger.info({ component: "executor", response }, "BUY order accepted");
@@ -483,7 +488,7 @@ export async function executeSell(tokenId, shareSize, limitPrice) {
         size:    roundedSize,
       },
       { tickSize: TICK_SIZE, negRisk: NEG_RISK },
-      OrderType.GTC,
+      IMMEDIATE_ORDER_TYPE,
     );
   } catch (err) {
     logger.error({ component: "executor", err: err?.message }, "Exception sending SELL order");
@@ -500,6 +505,10 @@ export async function executeSell(tokenId, shareSize, limitPrice) {
   if (!response || typeof response !== "object") {
     logger.error({ component: "executor", response }, "Unexpected API response for SELL order");
     throw new Error(`[executor] Resposta inesperada da API (SELL): ${JSON.stringify(response)}`);
+  }
+  if (response.success === false) {
+    logger.error({ component: "executor", response }, "SELL order was not successful");
+    throw new Error(`[executor] Ordem SELL não executada: ${JSON.stringify(response)}`);
   }
 
   logger.info({ component: "executor", response }, "SELL order accepted");

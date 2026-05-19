@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'fs';
 import { logger } from '../logging/logger.js';
 import path from 'path';
 
@@ -28,6 +28,7 @@ export class StateManager {
 
   saveState(state) {
     try {
+      mkdirSync(path.dirname(this.stateFilePath), { recursive: true });
       // Atomic write: write to temp file first, then rename
       writeFileSync(this.tempFilePath, JSON.stringify(state, null, 2), 'utf-8');
       renameSync(this.tempFilePath, this.stateFilePath);
@@ -48,8 +49,14 @@ export function serializeState(state) {
 }
 
 export function deserializeState(serializedState) {
-  return {
+  const positions = Array.isArray(serializedState.positions)
+    ? new Map(serializedState.positions)
+    : new Map(Object.entries(serializedState.positions || {}));
+  const state = {
     ...serializedState,
-    positions: new Map(Object.entries(serializedState.positions || {}))
+    positions
   };
+  state.openPositions = positions.size;
+  state.totalExposure = [...positions.values()].reduce((sum, pos) => sum + (Number(pos?.stakeUsed) || 0), 0);
+  return state;
 }
