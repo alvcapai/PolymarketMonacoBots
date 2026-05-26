@@ -198,6 +198,19 @@ export function decideEntry(state, {
   rsiNow = null,
   vwapDist = null
 }) {
+  if (state.paused || state.losingStreak >= 5) {
+    state.paused = true;
+    return {
+      canEnter: false,
+      reason: "paused",
+      side: null,
+      probModel: null,
+      probMarket: null,
+      edge: null,
+      stake: 0
+    };
+  }
+
   // Re-evaluate floor on every entry attempt so cycleEnded is always
   // coherent with the current bankroll, regardless of when checkCycleFloor
   // was last called in the main loop.
@@ -482,6 +495,9 @@ export function recordOutcomeByToken(state, tokenId, won) {
     state.losingStreak = 0;
   } else {
     state.losingStreak += 1;
+    if (state.losingStreak >= 5) {
+      state.paused = true;
+    }
   }
 
   recordOutcome(pos.side, won);
