@@ -84,20 +84,47 @@ export function syncBankroll(state, realBalance) {
 }
 
 export function checkWithdrawal(state) {
+  // ── Guardrail de Perdas: Congela saques se estiver em bad run ──────────────
+  if (state.losingStreak >= 2) {
+    return { shouldWithdraw: false, withdrawAmount: 0, resetTo: 0 };
+  }
+
   const freeCapital = state.bankroll - state.totalExposure;
-  if (freeCapital >= getWithdrawalTrigger()) {
+
+  // Definição da Escada de Saques Fracionária
+  const WITHDRAWAL_LADDER = [
+    { trigger: 90.0, amount: 25.0, resetTo: 65.0 },
+    { trigger: 60.0, amount: 15.0, resetTo: 45.0 },
+    { trigger: 40.0, amount: 10.0, resetTo: 30.0 }
+  ];
+
+  // Encontra o maior degrau aplicável ao capital livre atual
+  const step = WITHDRAWAL_LADDER.find(s => freeCapital >= s.trigger);
+
+  if (step) {
+    const withdrawAmount = step.amount;
+    const resetTo = step.resetTo;
+
+    // Persiste temporariamente os dados para recordWithdrawal consumir após a transação on-chain
+    state._pendingWithdrawal = { withdrawAmount, resetTo };
+
     return {
       shouldWithdraw: true,
-      withdrawAmount: getWithdrawalAmount(),
-      resetTo: state.bankroll - getWithdrawalAmount()
+      withdrawAmount,
+      resetTo
     };
   }
+
   return { shouldWithdraw: false, withdrawAmount: 0, resetTo: 0 };
 }
 
 export function recordWithdrawal(state) {
-  state.totalWithdrawn += getWithdrawalAmount();
-  state.bankroll = getBankrollResetTo();
+  // Recupera os valores salvos pelo checkWithdrawal
+  const pending = state._pendingWithdrawal || { withdrawAmount: 0, resetTo: state.bankroll };
+  delete state._pendingWithdrawal; // Limpa o estado temporário
+
+  state.totalWithdrawn += pending.withdrawAmount;
+  state.bankroll = pending.resetTo;
   state.cycleNumber += 1;
   state.losingStreak = 0;
   state.paused = false;
