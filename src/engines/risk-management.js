@@ -167,7 +167,9 @@ export function decideEntry(state, {
   priceDown = null,
   slippage = getTradeSlippageDefault(),
   basisStdDev = null,
-  trend = null
+  trend = null,
+  rsiNow = null,
+  vwapDist = null
 }) {
   // Re-evaluate floor on every entry attempt so cycleEnded is always
   // coherent with the current bankroll, regardless of when checkCycleFloor
@@ -206,6 +208,36 @@ export function decideEntry(state, {
   const denominator = Math.max(1 - tokenMarketProb, 0.01); // guard against price → 1
   const costAsProb = (getTakerFeeBps() / 10000 + slippage) / denominator;
   const netEdge = rawEdge - costAsProb;
+
+  // ── Guardrail de Exaustão (RSI Extremos) ──────────────────────────────────
+  if (rsiNow !== null) {
+    if (side === "UP" && rsiNow > 75) {
+      return {
+        canEnter: false,
+        reason: `exhaustion_guard_up_rejected (rsi=${rsiNow.toFixed(1)} > 75)`,
+        side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
+      };
+    }
+    if (side === "DOWN" && rsiNow < 25) {
+      return {
+        canEnter: false,
+        reason: `exhaustion_guard_down_rejected (rsi=${rsiNow.toFixed(1)} < 25)`,
+        side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
+      };
+    }
+  }
+
+  // ── Zona de Compressão / No-Trade Box (Lateralização de Preço) ─────────────
+  if (vwapDist !== null) {
+    const absDist = Math.abs(vwapDist);
+    if (absDist < 0.0005) { // 0.05% de distância máxima da média (VWAP)
+      return {
+        canEnter: false,
+        reason: `vwap_compression_zone_rejected (vwapDist=${(absDist * 100).toFixed(4)}% < 0.05%)`,
+        side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
+      };
+    }
+  }
 
   if (trend !== null && trend !== side) {
     return {

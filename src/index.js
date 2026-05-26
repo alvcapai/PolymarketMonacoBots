@@ -514,7 +514,9 @@ async function main() {
         priceDown: rawPriceDown,
         slippage: tradeSlippage,
         basisStdDev: basisStddev,
-        trend: trend5m
+        trend: trend5m,
+        rsiNow: rsiNow,
+        vwapDist: vwapDist
       });
 
       const signal = toDecisionSignal(decision);
