@@ -79,6 +79,7 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
     const remainingMinutes = settlementLeftMin;
 
     let slReason = null;
+    /* Stop-loss triggers disabled/removed
     if (remainingMinutes !== null) {
       const remainingSeconds = remainingMinutes * 60;
       const slRatio = currentPrice / entryPrice;
@@ -93,6 +94,7 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
         slReason = 'stop_loss_layer_C_late_60pct';
       }
     }
+    */
 
     if (slReason) {
       const proceeds = currentPrice * shareSize;

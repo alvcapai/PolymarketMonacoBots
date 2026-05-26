@@ -69,6 +69,16 @@ const TAKE_PROFIT_INTERVAL_MS = 10_000;
 // Rolling 30-candle history of (binanceClose − chainlinkPrice) for basis monitoring.
 const basisHistory = [];
 
+function calculateEma(values, period) {
+  if (!Array.isArray(values) || values.length < period) return null;
+  const k = 2 / (period + 1);
+  let prev = values[0];
+  for (let i = 1; i < values.length; i += 1) {
+    prev = values[i] * k + prev * (1 - k);
+  }
+  return prev;
+}
+
 function countVwapCrosses(closes, vwapSeries, lookback = 20) {
   const end = Math.min(closes.length, vwapSeries.length);
   const start = Math.max(1, end - lookback);
@@ -391,8 +401,9 @@ async function main() {
           ? Promise.resolve({ price: chainlinkWsPrice, updatedAt: chainlinkWsTick?.updatedAt ?? null, source: "chainlink_ws" })
           : fetchChainlinkBtcUsd();
 
-      const [klines1m, lastPrice, chainlink, poly] = await Promise.all([
+      const [klines1m, klines5m, lastPrice, chainlink, poly] = await Promise.all([
         fetchKlines({ interval: "1m", limit: 240 }),
+        fetchKlines({ interval: "5m", limit: 60 }),
         fetchLastPrice(),
         chainlinkPromise,
         fetchPolymarketSnapshot()
@@ -436,6 +447,14 @@ async function main() {
       const failedVwapReclaim = vwapNow !== null && vwapSeries.length >= 3
         ? closes[closes.length - 1] < vwapNow && closes[closes.length - 2] > vwapSeries[vwapSeries.length - 2]
         : false;
+
+      const closes5m = klines5m.map((k) => k.close);
+      const ema5mNow = calculateEma(closes5m, 20);
+      const lastPrice5m = closes5m[closes5m.length - 1];
+      let trend5m = null;
+      if (ema5mNow !== null && lastPrice5m !== null) {
+        trend5m = lastPrice5m > ema5mNow ? "UP" : "DOWN";
+      }
 
       // Basis tracking: Chainlink is the settlement source, Binance is the history source.
       // Log the spread each cycle; widen VWAP margin when basis is noisy (stddev > $25).
@@ -494,7 +513,8 @@ async function main() {
         priceUp: rawPriceUp,
         priceDown: rawPriceDown,
         slippage: tradeSlippage,
-        basisStdDev: basisStddev
+        basisStdDev: basisStddev,
+        trend: trend5m
       });
 
       const signal = toDecisionSignal(decision);

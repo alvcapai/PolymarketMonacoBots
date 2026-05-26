@@ -393,7 +393,7 @@ export async function executeTrade(marketTokenId, side, sizeUsdc, limitPrice, pr
     logger.info({ component: "executor", from: price, to: roundedPrice }, "Price rounded to tick");
   }
   // Arredondar shares para CIMA com 2 casas decimais.
-  const shareSize = Math.ceil((usdcSize / roundedPrice) * 100) / 100;
+  const shareSize = Number((Math.round((usdcSize / roundedPrice) * 100) / 100).toFixed(2));
 
   // ── Mock Mode ────────────────────────────────────────────────────────────
   if (TRADE_MOCK) {
@@ -467,7 +467,7 @@ export async function executeSell(tokenId, shareSize, limitPrice) {
     logger.info({ component: "executor", action: "SELL", from: price, to: roundedPrice }, "SELL price rounded to tick");
   }
 
-  const roundedSize = Math.floor(size * 100) / 100;
+  const roundedSize = Number((Math.floor(size * 100) / 100).toFixed(2));
 
   if (TRADE_MOCK) {
     logger.info({ component: "executor", action: "SELL", mock: true, tokenId: token, shareSize: roundedSize, price: roundedPrice }, "Mock SELL order");

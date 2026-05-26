@@ -19,7 +19,10 @@ export function getTradeSlippageDefault() { return getConfig().market.trade_slip
 export function getWithdrawalTrigger() { return getConfig().bankroll.withdrawal_trigger; }
 export function getWithdrawalAmount() { return getConfig().bankroll.withdrawal_amount; }
 export function getBankrollResetTo() { return getConfig().bankroll.bankroll_reset_to; }
-export function getBankrollRiskCap() { return getConfig().bankroll.risk_cap; }
+export function getBankrollRiskCap() { 
+  const val = getConfig().bankroll.risk_cap; 
+  return val !== undefined ? val : 1.0; 
+}
 export function getMinShares() { return getConfig().shares.min_shares; }
 
 let stateManager = null;
@@ -163,7 +166,8 @@ export function decideEntry(state, {
   priceUp = null,
   priceDown = null,
   slippage = getTradeSlippageDefault(),
-  basisStdDev = null
+  basisStdDev = null,
+  trend = null
 }) {
   // Re-evaluate floor on every entry attempt so cycleEnded is always
   // coherent with the current bankroll, regardless of when checkCycleFloor
@@ -202,6 +206,14 @@ export function decideEntry(state, {
   const denominator = Math.max(1 - tokenMarketProb, 0.01); // guard against price → 1
   const costAsProb = (getTakerFeeBps() / 10000 + slippage) / denominator;
   const netEdge = rawEdge - costAsProb;
+
+  if (trend !== null && trend !== side) {
+    return {
+      canEnter: false,
+      reason: `counter_trend_rejected (side=${side} vs trend=${trend})`,
+      side, probModel, probMarket, edge: netEdge, rawEdge, edgeUp, edgeDown, stake: 0
+    };
+  }
 
   // Hard guard: entry price cap
   const rawPrice = toFiniteOrNull(side === "UP" ? priceUp : priceDown);
