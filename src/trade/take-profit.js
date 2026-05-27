@@ -7,6 +7,8 @@ const MIN_TIME_FOR_STOP_LOSS = 5;  // don't cut losses if <5 min left — let it
 const CLOB_HOST = process.env.POLYMARKET_CLOB_HOST || "https://clob.polymarket.com";
 const TRADE_MOCK = String(process.env.TRADE_MOCK_MODE ?? "true").toLowerCase() === "true";
 
+const stopLossBreachTracker = new Map();
+
 // Dynamic sell threshold. All three components return a price level; we sell
 // when currentMidPrice >= max of all three.
 function computeSellThreshold({ entryPrice, probModel, remainingMinutes }) {
@@ -57,6 +59,13 @@ function removePositionFromState(bankrollState, tokenId, pos) {
 
 export async function checkTakeProfit(bankrollState, { settlementLeftMin = null } = {}) {
   const events = [];
+  // Clean up stale breach trackers for closed positions
+  for (const tokenId of stopLossBreachTracker.keys()) {
+    if (!bankrollState.positions.has(tokenId)) {
+      stopLossBreachTracker.delete(tokenId);
+    }
+  }
+
   const openPositions = [...bankrollState.positions.entries()];
   if (!openPositions.length) return { events };
 
@@ -79,7 +88,6 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
     const remainingMinutes = settlementLeftMin;
 
     let slReason = null;
-    /* Stop-loss triggers disabled/removed
     if (remainingMinutes !== null) {
       const remainingSeconds = remainingMinutes * 60;
       const slRatio = currentPrice / entryPrice;
@@ -94,7 +102,43 @@ export async function checkTakeProfit(bankrollState, { settlementLeftMin = null 
         slReason = 'stop_loss_layer_C_late_60pct';
       }
     }
-    */
+
+    if (slReason) {
+      let tracker = stopLossBreachTracker.get(tokenId);
+      if (!tracker) {
+        tracker = { count: 1, firstBreachedMs: Date.now(), reason: slReason };
+        stopLossBreachTracker.set(tokenId, tracker);
+        logger.warn({
+          component: "take-profit", tokenId: tokenId.slice(0, 20),
+          currentPrice, slReason, breachCount: 1
+        }, "Stop-loss threshold breached (1st check) — waiting for persistence filter (3 consecutive checks / 30s)");
+        slReason = null; // Do NOT trigger sell yet
+      } else {
+        tracker.count += 1;
+        tracker.reason = slReason;
+        logger.info({
+          component: "take-profit", tokenId: tokenId.slice(0, 20),
+          currentPrice, slReason, breachCount: tracker.count
+        }, `Stop-loss threshold breached (${tracker.count} consecutive checks)`);
+
+        if (tracker.count >= 3) {
+          stopLossBreachTracker.delete(tokenId);
+          logger.warn({
+            component: "take-profit", tokenId: tokenId.slice(0, 20),
+            currentPrice, slReason, totalChecks: tracker.count
+          }, "Stop-loss persistence filter met (3 consecutive breaches) — executing sell!");
+        } else {
+          slReason = null; // Do NOT trigger sell yet
+        }
+      }
+    } else {
+      if (stopLossBreachTracker.has(tokenId)) {
+        stopLossBreachTracker.delete(tokenId);
+        logger.info({
+          component: "take-profit", tokenId: tokenId.slice(0, 20), currentPrice
+        }, "Stop-loss threat averted — price recovered above thresholds. Tracker cleared.");
+      }
+    }
 
     if (slReason) {
       const proceeds = currentPrice * shareSize;
